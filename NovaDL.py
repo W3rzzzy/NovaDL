@@ -22,7 +22,6 @@ if os.name == 'nt':
     os.system('')
 
 # Директория для портативных зависимостей (yt-dlp, deno).
-# Позволяет избежать проблем с установкой через pip и отсутствием MSVC на Windows.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TOOLS_DIR = os.path.join(SCRIPT_DIR, "tools")
 YTDLP_EXE = os.path.join(TOOLS_DIR, "yt-dlp.exe")
@@ -47,10 +46,20 @@ def _save_config(cfg):
         return False
 
 _config = _load_config()
+CURRENT_LANG = _config.get("language", "ru")
+if CURRENT_LANG not in ("ru", "en"):
+    CURRENT_LANG = "ru"
 
 USER_HOME = os.path.expanduser("~")
 SAVE_PATH = os.environ.get("NOVADL_SAVE_PATH") or _config.get("save_path") or os.path.join(USER_HOME, "Downloads", "NovaDL")
-COOKIES_PATH = os.environ.get("NOVADL_COOKIES_PATH", os.path.join(USER_HOME, "Downloads", "cookies.txt"))
+
+# ──────────────────────────────────────────────────────────────────────────
+# УМНЫЙ ПОИСК COOKIES.TXT
+# Приоритет: NOVADL_COOKIES_PATH > SCRIPT_DIR/cookies.txt > Downloads/cookies.txt
+# ──────────────────────────────────────────────────────────────────────────
+local_cookies = os.path.join(SCRIPT_DIR, "cookies.txt")
+downloads_cookies = os.path.join(USER_HOME, "Downloads", "cookies.txt")
+COOKIES_PATH = os.environ.get("NOVADL_COOKIES_PATH") or (local_cookies if os.path.exists(local_cookies) else downloads_cookies)
 
 CLR = "\033[0m"
 GREEN = "\033[92m"
@@ -60,10 +69,201 @@ RED = "\033[91m"
 WHITE = "\033[97m"
 BOLD = "\033[1m"
 
+# ──────────────────────────────────────────────────────────────────────────
+# ЛОКАЛИЗАЦИЯ (i18n)
+# ──────────────────────────────────────────────────────────────────────────
+TRANSLATIONS = {
+    "ru": {
+        "curr_dir": "\n{WHITE}Текущая директория:{CLR} {YELLOW}{save_path}{CLR}",
+        "new_dir_prompt": "{WHITE}Новая директория (Enter - отмена):{CLR} ",
+        "op_cancelled": "{YELLOW}[~] Операция отменена.{CLR}",
+        "dir_error": "{RED}[-] Не удалось использовать данную директорию: {e}{CLR}",
+        "dir_env_warn": "{YELLOW}[~] Внимание: переменная окружения NOVADL_SAVE_PATH переопределит эту настройку при следующем запуске.{CLR}",
+        "dir_saved": "{GREEN}[+] Директория сохранена:{CLR} {WHITE}{new_path}{CLR}",
+        "dir_session_only": "{YELLOW}[~] Директория изменена только для текущей сессии (сбой сохранения конфига).{CLR}",
+        "ffmpeg_not_found": "{RED}[-] FFmpeg не найден в системе.{CLR}",
+        "ffmpeg_manual": "{YELLOW}[~] Установите FFmpeg вручную (https://ffmpeg.org/download.html) или укажите путь через переменную NOVADL_FFMPEG_DIR.{CLR}",
+        "ffmpeg_winget": "{CYAN}[*] FFmpeg не найден, устанавливаю через winget...{CLR}",
+        "ffmpeg_winget_err": "{RED}[-] Не удалось установить FFmpeg автоматически: {e}{CLR}",
+        "ffmpeg_installed": "{GREEN}[+] FFmpeg установлен: {path}{CLR}",
+        "ffmpeg_still_not_found": "{RED}[-] FFmpeg всё ещё не найден после установки. Проверьте PATH или переменную NOVADL_FFMPEG_DIR.{CLR}",
+        "ytdlp_downloading": "{CYAN}[*] Загрузка портативной версии yt-dlp...{CLR}",
+        "hash_skip": "{YELLOW}[~] Не удалось получить контрольную сумму {file}, проверка пропущена.{CLR}",
+        "ytdlp_err": "{RED}[-] Ошибка загрузки yt-dlp: {e}{CLR}",
+        "ytdlp_fallback": "{YELLOW}[~] Попытка использовать системный yt-dlp из PATH.{CLR}",
+        "deno_downloading": "{CYAN}[*] Загрузка Deno (JS-runtime)...{CLR}",
+        "deno_err": "{RED}[-] Ошибка загрузки Deno: {e}{CLR}",
+        "deno_warn": "{YELLOW}[~] Без JS-runtime возможны ошибки 'Requested format is not available'.{CLR}",
+        "chk_ytdlp": "{CYAN}[*] Проверка обновлений yt-dlp...{CLR}",
+        "chk_spotdl": "{CYAN}[*] Проверка обновлений spotdl...{CLR}",
+        "spotdl_deps": "{CYAN}[*] spotdl не найден, устанавливаю зависимости (первый запуск, может занять минуту)...{CLR}",
+        "spotdl_err_pkg": "{RED}[-] Ошибка установки пакета {pkg}: {e}{CLR}",
+        "spotdl_ready": "{GREEN}[+] spotdl готов к работе.{CLR}",
+        "spotdl_fail": "{RED}[-] Не удалось установить spotdl. Проверьте подключение к интернету и права на запись в окружение Python.{CLR}",
+        "cookie_not_found": "{YELLOW}[~] Файл cookies.txt не найден ({path}). Пробую взять cookies из Chrome автоматически.{CLR}",
+        "cookie_chrome_warn": "{YELLOW}[~] Если Chrome сейчас открыт, это иногда мешает чтению его базы cookies — при ошибке закройте браузер или подготовьте свой cookies.txt (см. README).{CLR}",
+        "cookie_issue_hint1": "\n{YELLOW}[~] Похоже, не удалось прочитать cookies из Chrome — браузер может быть открыт, а его база cookies временно заблокирована.{CLR}",
+        "cookie_issue_hint2": "{YELLOW}[~] Закройте Chrome и повторите попытку, либо экспортируйте cookies.txt (расширение 'Get cookies.txt LOCALLY') и укажите путь через NOVADL_COOKIES_PATH.{CLR}",
+        "popen_err": "\n{RED}[-] Не удалось запустить процесс загрузки: {e}{CLR}",
+        "playlist_track": "\n\n{WHITE}{BOLD}[Плейлист] Обработка трека {curr} из {total}...{CLR}",
+        "downloading_num": "Загрузка #{num} ",
+        "extract_audio": "\n{YELLOW}[*] Извлечение аудиопотока...{CLR}",
+        "process_cover": "{YELLOW}[*] Обработка обложки...{CLR}",
+        "save_meta": "{YELLOW}[*] Сохранение метаданных...{CLR}",
+        "fetching_db": "\n{YELLOW}[*] Поиск трека в базе данных...{CLR}",
+        "download_audio": "Загрузка аудио",
+        "applying_tags": "\n{YELLOW}[*] Применение тегов и финализация...{CLR}",
+        "files_not_saved": "\n\n{RED}[-] Файлы не сохранены. Лог утилиты:{CLR}",
+        "files_saved": "\n{GREEN}[+] Успешно сохранено файлов: {count}{CLR}",
+        "playlist_fetch": "{CYAN}[*] Получение списка элементов плейлиста (один запрос)...{CLR}",
+        "playlist_found": "{CYAN}[*] Найдено элементов: {count}. Загрузка в {workers} поток(а/ов)...{CLR}\n",
+        "playlist_fallback": "{YELLOW}[~] Не удалось получить список плейлиста заранее, использую резервный режим ({workers} потоков)...{CLR}\n",
+        "thread_err": "[-] Ошибка потока {id}: {e}",
+        "thread_start_err": "[-] Поток {id} не смог запуститься: {e}",
+        "thread_progress": "{CYAN}[Поток {id}]{CLR} {GREEN}{pct:>5.1f}%{CLR}{speed}",
+        "no_files_saved": "\n{RED}[-] Ни один поток не сохранил файлы.{CLR}",
+        "unsupported_platform": "\n{RED}[-] Ошибка: Платформа не поддерживается.{CLR}",
+        "source": "\n{GREEN}[+] Источник: {BOLD}{platform}{CLR} | {GREEN}Формат: {BOLD}{fmt}{CLR}",
+        "starting": "{CYAN}[*] Запуск обработки...{CLR}\n",
+        "spotdl_not_avail": "\n{RED}[-] spotdl недоступен, загрузка отменена.{CLR}",
+        "spotdl_not_found": "\n{RED}[-] Модуль spotdl не найден.{CLR}",
+        "ytdlp_not_found": "\n{RED}[-] Утилита yt-dlp не найдена.{CLR}",
+        "fallback_start": "\n{YELLOW}[~] Основные клиенты недоступны. Запуск резервного варианта...{CLR}\n",
+        "separator": "{CYAN}──────────────────────────────────────────────────{CLR}",
+        "partial_success": "{YELLOW}{BOLD}[~] Загрузка завершена (Частичный успех: некоторые файлы пропущены){CLR}",
+        "success": "{GREEN}{BOLD}[+] Загрузка успешно завершена{CLR}",
+        "saved_dir": "{WHITE}    Директория: {path}{CLR}",
+        "aborted": "{RED}[-] Загрузка прервана из-за ошибки.{CLR}",
+        "aborted_cookie_hint": "{YELLOW}[~] Если ошибка связана с авторизацией — попробуйте закрыть Chrome или указать готовый cookies.txt через NOVADL_COOKIES_PATH.{CLR}",
+        "input_1_2_3": "\r{YELLOW}[~] Нажмите 1, 2 или 3...{CLR}   ",
+        "input_1_2_3_unix": "{WHITE}Выбор (1-3):{CLR} ",
+        "input_1_2_3_warn": "{YELLOW}[~] Нужно ввести 1, 2 или 3.{CLR}",
+        "main_title": "{CYAN}NovaDL  |  v1.2.0{CLR}",
+        "main_save": "{WHITE}• Сохранение:  {YELLOW}{path}{CLR}",
+        "main_cookie": "{WHITE}• Файл куки:   {color}{status}{CLR}",
+        "cookie_active": "Активен",
+        "cookie_browser": "Не найден (используется браузер)",
+        "main_ffmpeg": "{WHITE}• FFmpeg:      {color}{status}{CLR}",
+        "ffmpeg_not_found_status": "Не найден",
+        "main_lang": "{WHITE}• Язык (Lang): {GREEN}Русский (RU){CLR}",
+        "url_prompt": "{WHITE}URL (0 - настройки, Enter - выход):{CLR} ",
+        "press_enter": "\n{WHITE}Нажмите Enter для продолжения...{CLR}",
+        "choose_format": "\n{WHITE}Выберите формат:{CLR}",
+        "fmt_mp3": " {GREEN}1.{CLR} MP3  {WHITE}(Аудио 320kbps + обложка + теги){CLR}",
+        "fmt_wav": " {GREEN}2.{CLR} WAV  {WHITE}(Lossless аудио без сжатия){CLR}",
+        "fmt_mp4": " {GREEN}3.{CLR} MP4  {WHITE}(Видео в максимальном качестве){CLR}",
+        "sys_err": "\n{RED}[-] Системная ошибка: {e}{CLR}",
+        "settings_title": "\n{WHITE}НАСТРОЙКИ (SETTINGS):{CLR}",
+        "settings_opt1": " {GREEN}1.{CLR} Изменить директорию сохранения (Change save path)",
+        "settings_opt2": " {GREEN}2.{CLR} Изменить язык (Change language)",
+        "settings_opt3": " {GREEN}3.{CLR} Назад (Back)",
+        "settings_prompt": "{WHITE}Выбор / Choice (1-3):{CLR} "
+    },
+    "en": {
+        "curr_dir": "\n{WHITE}Current directory:{CLR} {YELLOW}{save_path}{CLR}",
+        "new_dir_prompt": "{WHITE}New directory (Enter to cancel):{CLR} ",
+        "op_cancelled": "{YELLOW}[~] Operation cancelled.{CLR}",
+        "dir_error": "{RED}[-] Failed to use this directory: {e}{CLR}",
+        "dir_env_warn": "{YELLOW}[~] Warning: The NOVADL_SAVE_PATH environment variable will override this on next startup.{CLR}",
+        "dir_saved": "{GREEN}[+] Directory saved:{CLR} {WHITE}{new_path}{CLR}",
+        "dir_session_only": "{YELLOW}[~] Directory changed for this session only (failed to save config).{CLR}",
+        "ffmpeg_not_found": "{RED}[-] FFmpeg not found on the system.{CLR}",
+        "ffmpeg_manual": "{YELLOW}[~] Install FFmpeg manually (https://ffmpeg.org/download.html) or set NOVADL_FFMPEG_DIR.{CLR}",
+        "ffmpeg_winget": "{CYAN}[*] FFmpeg not found, installing via winget...{CLR}",
+        "ffmpeg_winget_err": "{RED}[-] Failed to install FFmpeg automatically: {e}{CLR}",
+        "ffmpeg_installed": "{GREEN}[+] FFmpeg installed: {path}{CLR}",
+        "ffmpeg_still_not_found": "{RED}[-] FFmpeg still not found after installation. Check PATH or NOVADL_FFMPEG_DIR.{CLR}",
+        "ytdlp_downloading": "{CYAN}[*] Downloading portable yt-dlp...{CLR}",
+        "hash_skip": "{YELLOW}[~] Failed to fetch checksum for {file}, verification skipped.{CLR}",
+        "ytdlp_err": "{RED}[-] yt-dlp download error: {e}{CLR}",
+        "ytdlp_fallback": "{YELLOW}[~] Attempting to use system yt-dlp from PATH.{CLR}",
+        "deno_downloading": "{CYAN}[*] Downloading Deno (JS-runtime)...{CLR}",
+        "deno_err": "{RED}[-] Deno download error: {e}{CLR}",
+        "deno_warn": "{YELLOW}[~] Without JS-runtime, 'Requested format is not available' errors may occur.{CLR}",
+        "chk_ytdlp": "{CYAN}[*] Checking for yt-dlp updates...{CLR}",
+        "chk_spotdl": "{CYAN}[*] Checking for spotdl updates...{CLR}",
+        "spotdl_deps": "{CYAN}[*] spotdl not found, installing dependencies (first run, may take a minute)...{CLR}",
+        "spotdl_err_pkg": "{RED}[-] Failed to install package {pkg}: {e}{CLR}",
+        "spotdl_ready": "{GREEN}[+] spotdl is ready to use.{CLR}",
+        "spotdl_fail": "{RED}[-] Failed to install spotdl. Check your internet connection and Python environment permissions.{CLR}",
+        "cookie_not_found": "{YELLOW}[~] cookies.txt not found ({path}). Attempting to extract cookies from Chrome.{CLR}",
+        "cookie_chrome_warn": "{YELLOW}[~] If Chrome is currently open, it may block access to its cookie database. Close it if an error occurs, or prepare a cookies.txt file.{CLR}",
+        "cookie_issue_hint1": "\n{YELLOW}[~] It seems cookie extraction from Chrome failed. The browser might be open and locking the database.{CLR}",
+        "cookie_issue_hint2": "{YELLOW}[~] Close Chrome and try again, or export cookies.txt (extension 'Get cookies.txt LOCALLY') and set NOVADL_COOKIES_PATH.{CLR}",
+        "popen_err": "\n{RED}[-] Failed to start download process: {e}{CLR}",
+        "playlist_track": "\n\n{WHITE}{BOLD}[Playlist] Processing track {curr} of {total}...{CLR}",
+        "downloading_num": "Downloading #{num} ",
+        "extract_audio": "\n{YELLOW}[*] Extracting audio stream...{CLR}",
+        "process_cover": "{YELLOW}[*] Processing cover art...{CLR}",
+        "save_meta": "{YELLOW}[*] Saving metadata...{CLR}",
+        "fetching_db": "\n{YELLOW}[*] Searching for track in database...{CLR}",
+        "download_audio": "Downloading audio",
+        "applying_tags": "\n{YELLOW}[*] Applying tags and finalizing...{CLR}",
+        "files_not_saved": "\n\n{RED}[-] Files not saved. Utility log:{CLR}",
+        "files_saved": "\n{GREEN}[+] Successfully saved files: {count}{CLR}",
+        "playlist_fetch": "{CYAN}[*] Fetching playlist items (single request)...{CLR}",
+        "playlist_found": "{CYAN}[*] Found {count} items. Downloading with {workers} thread(s)...{CLR}\n",
+        "playlist_fallback": "{YELLOW}[~] Failed to pre-fetch playlist, using fallback mode ({workers} threads)...{CLR}\n",
+        "thread_err": "[-] Thread {id} error: {e}",
+        "thread_start_err": "[-] Thread {id} failed to start: {e}",
+        "thread_progress": "{CYAN}[Thread {id}]{CLR} {GREEN}{pct:>5.1f}%{CLR}{speed}",
+        "no_files_saved": "\n{RED}[-] No threads saved any files.{CLR}",
+        "unsupported_platform": "\n{RED}[-] Error: Platform not supported.{CLR}",
+        "source": "\n{GREEN}[+] Source: {BOLD}{platform}{CLR} | {GREEN}Format: {BOLD}{fmt}{CLR}",
+        "starting": "{CYAN}[*] Starting process...{CLR}\n",
+        "spotdl_not_avail": "\n{RED}[-] spotdl is unavailable, download aborted.{CLR}",
+        "spotdl_not_found": "\n{RED}[-] spotdl module not found.{CLR}",
+        "ytdlp_not_found": "\n{RED}[-] yt-dlp utility not found.{CLR}",
+        "fallback_start": "\n{YELLOW}[~] Main clients unavailable. Starting fallback variant...{CLR}\n",
+        "separator": "{CYAN}──────────────────────────────────────────────────{CLR}",
+        "partial_success": "{YELLOW}{BOLD}[~] Download finished (Partial success: some files skipped){CLR}",
+        "success": "{GREEN}{BOLD}[+] Download completed successfully{CLR}",
+        "saved_dir": "{WHITE}    Directory: {path}{CLR}",
+        "aborted": "{RED}[-] Download aborted due to an error.{CLR}",
+        "aborted_cookie_hint": "{YELLOW}[~] If the error is auth-related — try closing Chrome or providing a cookies.txt file via NOVADL_COOKIES_PATH.{CLR}",
+        "input_1_2_3": "\r{YELLOW}[~] Press 1, 2, or 3...{CLR}   ",
+        "input_1_2_3_unix": "{WHITE}Choice (1-3):{CLR} ",
+        "input_1_2_3_warn": "{YELLOW}[~] Please enter 1, 2, or 3.{CLR}",
+        "main_title": "{CYAN}NovaDL  |  v1.2.0{CLR}",
+        "main_save": "{WHITE}• Save path:   {YELLOW}{path}{CLR}",
+        "main_cookie": "{WHITE}• Cookie file: {color}{status}{CLR}",
+        "cookie_active": "Active",
+        "cookie_browser": "Not found (using browser)",
+        "main_ffmpeg": "{WHITE}• FFmpeg:      {color}{status}{CLR}",
+        "ffmpeg_not_found_status": "Not found",
+        "main_lang": "{WHITE}• Language:    {GREEN}English (EN){CLR}",
+        "url_prompt": "{WHITE}URL (0 - settings, Enter - exit):{CLR} ",
+        "press_enter": "\n{WHITE}Press Enter to continue...{CLR}",
+        "choose_format": "\n{WHITE}Choose format:{CLR}",
+        "fmt_mp3": " {GREEN}1.{CLR} MP3  {WHITE}(Audio 320kbps + cover + tags){CLR}",
+        "fmt_wav": " {GREEN}2.{CLR} WAV  {WHITE}(Lossless audio uncompressed){CLR}",
+        "fmt_mp4": " {GREEN}3.{CLR} MP4  {WHITE}(Video in max quality){CLR}",
+        "sys_err": "\n{RED}[-] System error: {e}{CLR}",
+        "settings_title": "\n{WHITE}SETTINGS:{CLR}",
+        "settings_opt1": " {GREEN}1.{CLR} Change save directory",
+        "settings_opt2": " {GREEN}2.{CLR} Change language (RU / EN)",
+        "settings_opt3": " {GREEN}3.{CLR} Back",
+        "settings_prompt": "{WHITE}Choice (1-3):{CLR} "
+    }
+}
+
+def tr(key, **kwargs):
+    """Возвращает переведённую строку, подставляя цвета и переданные аргументы."""
+    lang_dict = TRANSLATIONS.get(CURRENT_LANG, TRANSLATIONS["ru"])
+    text = lang_dict.get(key, TRANSLATIONS["ru"].get(key, key))
+    fmt_kwargs = {
+        "CLR": CLR, "GREEN": GREEN, "CYAN": CYAN, "YELLOW": YELLOW,
+        "RED": RED, "WHITE": WHITE, "BOLD": BOLD
+    }
+    fmt_kwargs.update(kwargs)
+    try:
+        return text.format(**fmt_kwargs)
+    except Exception:
+        return text
+
 _log_lock = threading.Lock()
 
 def log_line(text):
-    """Пишет строку в лог-файл (для последующей отладки/issue на GitHub). Никогда не бросает исключений наружу."""
     try:
         with _log_lock:
             os.makedirs(TOOLS_DIR, exist_ok=True)
@@ -72,14 +272,8 @@ def log_line(text):
     except Exception:
         pass
 
-# ──────────────────────────────────────────────────────────────────────────
-# FFmpeg: поиск без привязки к конкретной версии winget-пакета
-# ──────────────────────────────────────────────────────────────────────────
-
 def _find_ffmpeg_dir():
-    """Ищет директорию с ffmpeg в порядке приоритета, без жёсткой привязки к версии пакета."""
     exe_name = "ffmpeg.exe" if os.name == 'nt' else "ffmpeg"
-
     env_dir = os.environ.get("NOVADL_FFMPEG_DIR")
     if env_dir and os.path.isfile(os.path.join(env_dir, exe_name)):
         return env_dir
@@ -96,7 +290,6 @@ def _find_ffmpeg_dir():
             candidates = glob.glob(os.path.join(winget_packages, "Gyan.FFmpeg*", "*", "bin", "ffmpeg.exe"))
             candidates += glob.glob(os.path.join(winget_packages, "Gyan.FFmpeg*", "bin", "ffmpeg.exe"))
             if candidates:
-                # Берём самую свежую версию: сортировка по имени папки (обычно содержит версию)
                 candidates.sort(reverse=True)
                 return os.path.dirname(candidates[0])
         except Exception:
@@ -105,7 +298,6 @@ def _find_ffmpeg_dir():
         portable = os.path.join(TOOLS_DIR, "ffmpeg", "bin")
         if os.path.isfile(os.path.join(portable, "ffmpeg.exe")):
             return portable
-
     return ""
 
 FFMPEG_DIR = _find_ffmpeg_dir()
@@ -114,21 +306,18 @@ if FFMPEG_DIR and FFMPEG_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
 
 def ensure_ffmpeg():
-    """Проверяет наличие FFmpeg и, если это Windows с winget, пытается доустановить его."""
     global FFMPEG_DIR
-
     exe_name = "ffmpeg.exe" if os.name == 'nt' else "ffmpeg"
     if FFMPEG_DIR and os.path.isfile(os.path.join(FFMPEG_DIR, exe_name)):
         return
 
     if os.name != 'nt' or not shutil.which("winget"):
-        print(f"{RED}[-] FFmpeg не найден в системе.{CLR}")
-        print(f"{YELLOW}[~] Установите FFmpeg вручную (https://ffmpeg.org/download.html) "
-              f"или укажите путь через переменную NOVADL_FFMPEG_DIR.{CLR}")
+        print(tr("ffmpeg_not_found"))
+        print(tr("ffmpeg_manual"))
         log_line("FFmpeg не найден, автоустановка недоступна (нет winget или не Windows)")
         return
 
-    print(f"{CYAN}[*] FFmpeg не найден, устанавливаю через winget...{CLR}")
+    print(tr("ffmpeg_winget"))
     try:
         subprocess.run(
             ["winget", "install", "--id", "Gyan.FFmpeg", "-e", "--silent",
@@ -136,7 +325,7 @@ def ensure_ffmpeg():
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180
         )
     except Exception as e:
-        print(f"{RED}[-] Не удалось установить FFmpeg автоматически: {e}{CLR}")
+        print(tr("ffmpeg_winget_err", e=e))
         log_line(f"Ошибка автоустановки FFmpeg: {e}")
         return
 
@@ -144,10 +333,9 @@ def ensure_ffmpeg():
     if FFMPEG_DIR:
         if FFMPEG_DIR not in os.environ.get("PATH", ""):
             os.environ["PATH"] = FFMPEG_DIR + os.pathsep + os.environ.get("PATH", "")
-        print(f"{GREEN}[+] FFmpeg установлен: {FFMPEG_DIR}{CLR}")
+        print(tr("ffmpeg_installed", path=FFMPEG_DIR))
     else:
-        print(f"{RED}[-] FFmpeg всё ещё не найден после установки. "
-              f"Проверьте PATH или переменную NOVADL_FFMPEG_DIR.{CLR}")
+        print(tr("ffmpeg_still_not_found"))
         log_line("FFmpeg не найден после попытки автоустановки через winget")
 
 YTDLP_RELEASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
@@ -168,28 +356,28 @@ def ensure_save_directory():
 
 def prompt_change_save_directory():
     global SAVE_PATH
-    print(f"\n{WHITE}Текущая директория:{CLR} {YELLOW}{SAVE_PATH}{CLR}")
-    new_path = input(f"{WHITE}Новая директория (Enter - отмена):{CLR} ").strip().strip('"')
+    print(tr("curr_dir", save_path=SAVE_PATH))
+    new_path = input(tr("new_dir_prompt")).strip().strip('"')
     if not new_path:
-        print(f"{YELLOW}[~] Операция отменена.{CLR}")
+        print(tr("op_cancelled"))
         return
 
     try:
         os.makedirs(new_path, exist_ok=True)
     except Exception as e:
-        print(f"{RED}[-] Не удалось использовать данную директорию: {e}{CLR}")
+        print(tr("dir_error", e=e))
         return
 
     if os.environ.get("NOVADL_SAVE_PATH"):
-        print(f"{YELLOW}[~] Внимание: переменная окружения NOVADL_SAVE_PATH переопределит эту настройку при следующем запуске.{CLR}")
+        print(tr("dir_env_warn"))
 
     SAVE_PATH = new_path
     cfg = _load_config()
     cfg["save_path"] = new_path
     if _save_config(cfg):
-        print(f"{GREEN}[+] Директория сохранена:{CLR} {WHITE}{new_path}{CLR}")
+        print(tr("dir_saved", new_path=new_path))
     else:
-        print(f"{YELLOW}[~] Директория изменена только для текущей сессии (сбой сохранения конфига).{CLR}")
+        print(tr("dir_session_only"))
 
 def _with_retries(fn, attempts=3, delay=2):
     last_err = None
@@ -210,7 +398,6 @@ def _verify_sha256(data, expected_hex):
     return hashlib.sha256(data).hexdigest().lower() == expected_hex.strip().lower()
 
 def _extract_hash_for_file(sums_text, filename):
-    """Разбирает файл контрольных сумм формата 'hash  filename' или содержащий только hash."""
     for line in sums_text.splitlines():
         line = line.strip()
         if not line:
@@ -219,7 +406,6 @@ def _extract_hash_for_file(sums_text, filename):
         if len(parts) >= 2 and parts[-1].lstrip("*") == filename:
             return parts[0]
         if len(parts) == 1 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
-            # Файл сумм содержит только хеш (без имени файла) - характерно для *.sha256sum
             return parts[0]
     return None
 
@@ -231,7 +417,7 @@ def ensure_ytdlp():
         return YTDLP_EXE
 
     os.makedirs(TOOLS_DIR, exist_ok=True)
-    print(f"{CYAN}[*] Загрузка портативной версии yt-dlp...{CLR}")
+    print(tr("ytdlp_downloading"))
     try:
         data = _with_retries(lambda: _fetch_url_bytes(YTDLP_RELEASE_URL, timeout=60))
 
@@ -245,19 +431,18 @@ def ensure_ytdlp():
             if not _verify_sha256(data, expected):
                 raise ValueError("Контрольная сумма yt-dlp.exe не совпадает с ожидаемой — загрузка отменена")
         else:
-            print(f"{YELLOW}[~] Не удалось получить контрольную сумму yt-dlp.exe, проверка пропущена.{CLR}")
+            print(tr("hash_skip", file="yt-dlp.exe"))
 
         with open(YTDLP_EXE, "wb") as f:
             f.write(data)
         return YTDLP_EXE
     except Exception as e:
-        print(f"{RED}[-] Ошибка загрузки yt-dlp: {e}{CLR}")
-        print(f"{YELLOW}[~] Попытка использовать системный yt-dlp из PATH.{CLR}")
+        print(tr("ytdlp_err", e=e))
+        print(tr("ytdlp_fallback"))
         log_line(f"Ошибка загрузки yt-dlp: {e}")
         return "yt-dlp"
 
 def ensure_deno():
-    """Deno требуется yt-dlp как JS-runtime для прохождения защиты YouTube."""
     if os.name != 'nt':
         return
 
@@ -267,7 +452,7 @@ def ensure_deno():
         return
 
     os.makedirs(TOOLS_DIR, exist_ok=True)
-    print(f"{CYAN}[*] Загрузка Deno (JS-runtime)...{CLR}")
+    print(tr("deno_downloading"))
     try:
         zip_bytes = _with_retries(lambda: _fetch_url_bytes(DENO_RELEASE_URL, timeout=30))
 
@@ -281,14 +466,14 @@ def ensure_deno():
             if not _verify_sha256(zip_bytes, expected):
                 raise ValueError("Контрольная сумма архива Deno не совпадает с ожидаемой — установка отменена")
         else:
-            print(f"{YELLOW}[~] Не удалось получить контрольную сумму Deno, проверка пропущена.{CLR}")
+            print(tr("hash_skip", file="Deno"))
 
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
             z.extract("deno.exe", TOOLS_DIR)
         os.environ["PATH"] = TOOLS_DIR + os.pathsep + os.environ.get("PATH", "")
     except Exception as e:
-        print(f"{RED}[-] Ошибка загрузки Deno: {e}{CLR}")
-        print(f"{YELLOW}[~] Без JS-runtime возможны ошибки 'Requested format is not available'.{CLR}")
+        print(tr("deno_err", e=e))
+        print(tr("deno_warn"))
         log_line(f"Ошибка загрузки Deno: {e}")
 
 _UPDATE_STATE_LOCK = threading.Lock()
@@ -320,17 +505,11 @@ def update_tools(ytdlp_bin):
         state["ytdlp"] = time.time()
         save_update_state(state)
 
-    print(f"{CYAN}[*] Проверка обновлений yt-dlp...{CLR}")
+    print(tr("chk_ytdlp"))
     try:
         subprocess.run([ytdlp_bin, "-U"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     except Exception:
         pass
-
-# ──────────────────────────────────────────────────────────────────────────
-# spotdl: устанавливается синхронно и ЛЕНИВО (только при первом реальном
-# использовании), чтобы не гоняться наперегонки с пользователем, который
-# может выбрать Spotify-ссылку раньше, чем фоновая установка завершится.
-# ──────────────────────────────────────────────────────────────────────────
 
 _spotdl_lock = threading.Lock()
 _spotdl_ready = False
@@ -342,7 +521,6 @@ def _spotdl_importable():
         return False
 
 def ensure_spotdl_installed():
-    """Блокирующая проверка/установка spotdl. Вызывается непосредственно перед первой загрузкой со Spotify."""
     global _spotdl_ready
     with _spotdl_lock:
         if _spotdl_ready:
@@ -352,7 +530,7 @@ def ensure_spotdl_installed():
             _spotdl_ready = True
             return True
 
-        print(f"{CYAN}[*] spotdl не найден, устанавливаю зависимости (первый запуск, может занять минуту)...{CLR}")
+        print(tr("spotdl_deps"))
         for pkg in ("yt-dlp", "yt-dlp-ejs", "spotdl"):
             try:
                 subprocess.run(
@@ -360,18 +538,17 @@ def ensure_spotdl_installed():
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120
                 )
             except Exception as e:
-                print(f"{RED}[-] Ошибка установки пакета {pkg}: {e}{CLR}")
+                print(tr("spotdl_err_pkg", pkg=pkg, e=e))
                 log_line(f"Ошибка установки {pkg}: {e}")
 
         _spotdl_ready = _spotdl_importable()
         if _spotdl_ready:
-            print(f"{GREEN}[+] spotdl готов к работе.{CLR}")
+            print(tr("spotdl_ready"))
         else:
-            print(f"{RED}[-] Не удалось установить spotdl. Проверьте подключение к интернету и права на запись в окружение Python.{CLR}")
+            print(tr("spotdl_fail"))
         return _spotdl_ready
 
 def update_spotdl_dependencies_background():
-    """Фоновое периодическое обновление УЖЕ установленного spotdl. Не устанавливает его с нуля."""
     with _UPDATE_STATE_LOCK:
         state = load_update_state()
         if not check_should_update(state, "spotdl_deps"):
@@ -380,9 +557,9 @@ def update_spotdl_dependencies_background():
         save_update_state(state)
 
     if not _spotdl_importable():
-        return  # первая установка выполняется лениво и синхронно в ensure_spotdl_installed()
+        return
 
-    print(f"{CYAN}[*] Проверка обновлений spotdl...{CLR}")
+    print(tr("chk_spotdl"))
     for pkg in ("yt-dlp", "yt-dlp-ejs", "spotdl"):
         try:
             subprocess.run(
@@ -391,11 +568,6 @@ def update_spotdl_dependencies_background():
             )
         except Exception:
             pass
-
-# ──────────────────────────────────────────────────────────────────────────
-# Параллелизм: дефолты снижены, чтобы не провоцировать троттлинг/баны
-# со стороны YouTube/SoundCloud при плейлистах.
-# ──────────────────────────────────────────────────────────────────────────
 
 CONCURRENT_FRAGMENTS = int(os.environ.get("NOVADL_CONCURRENT_FRAGMENTS", "8"))
 SPOTDL_THREADS = os.environ.get("NOVADL_SPOTDL_THREADS", "4")
@@ -430,14 +602,6 @@ def get_speed_args():
         "--http-chunk-size", HTTP_CHUNK_SIZE,
     ]
 
-# ──────────────────────────────────────────────────────────────────────────
-# Cookies: файл cookies.txt в приоритете, браузер — только как фолбэк.
-# Извлечение cookies из открытого Chrome может падать из-за заблокированной
-# SQLite-базы — мы не можем это надёжно предсказать заранее на всех ОС,
-# поэтому предупреждаем один раз до попытки и даём понятную подсказку,
-# если после неудачной загрузки в логе обнаружатся характерные признаки.
-# ──────────────────────────────────────────────────────────────────────────
-
 _cookie_warning_shown = False
 
 def get_cookies_args():
@@ -446,10 +610,8 @@ def get_cookies_args():
         return ["--cookies", COOKIES_PATH]
 
     if not _cookie_warning_shown:
-        print(f"{YELLOW}[~] Файл cookies.txt не найден ({COOKIES_PATH}). "
-              f"Пробую взять cookies из Chrome автоматически.{CLR}")
-        print(f"{YELLOW}[~] Если Chrome сейчас открыт, это иногда мешает чтению его базы cookies — "
-              f"при ошибке закройте браузер или подготовьте свой cookies.txt (см. README).{CLR}")
+        print(tr("cookie_not_found", path=COOKIES_PATH))
+        print(tr("cookie_chrome_warn"))
         _cookie_warning_shown = True
 
     return ["--cookies-from-browser", "chrome"]
@@ -465,18 +627,14 @@ COOKIE_ISSUE_MARKERS = (
 )
 
 def has_cookie_issue(logs):
-    """Определяет, похожа ли неудача на проблему с извлечением cookies из браузера
-    (например, заблокированная открытым Chrome база данных)."""
     if os.path.exists(COOKIES_PATH):
         return False
     low = " ".join(l.lower() for l in logs)
     return any(marker in low for marker in COOKIE_ISSUE_MARKERS)
 
 def print_cookie_issue_hint():
-    print(f"\n{YELLOW}[~] Похоже, не удалось прочитать cookies из Chrome — браузер может быть открыт,"
-          f" а его база cookies временно заблокирована.{CLR}")
-    print(f"{YELLOW}[~] Закройте Chrome и повторите попытку, либо экспортируйте cookies.txt "
-          f"(расширение 'Get cookies.txt LOCALLY') и укажите путь через NOVADL_COOKIES_PATH.{CLR}")
+    print(tr("cookie_issue_hint1"))
+    print(tr("cookie_issue_hint2"))
 
 def clean_url(url):
     url = url.strip().strip('"').strip("'")
@@ -496,16 +654,11 @@ def is_playlist_url(url):
         parsed = urlparse(url)
     except Exception:
         return False
-
     qs = parse_qs(parsed.query)
     if "list" in qs:
         if "v" in qs:
             return False
         return True
-
-    # Раньше здесь был дубликат "/sets" рядом с "/sets/", из-за чего проверка
-    # ничего не выигрывала от второго варианта. Приведено к явному списку
-    # путей-коллекций: /sets/, /likes, /reposts для SoundCloud и /playlist/, /album/ для Spotify.
     path = parsed.path.lower()
     return any(seg in path for seg in ("/sets/", "/likes", "/reposts", "/playlist/", "/album/"))
 
@@ -534,19 +687,13 @@ def execute_and_stream_output(cmd, platform):
 
     try:
         process = subprocess.Popen(
-            cmd,
-            cwd=SAVE_PATH,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            encoding='utf-8',
-            errors='ignore',
-            bufsize=1
+            cmd, cwd=SAVE_PATH, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, encoding='utf-8', errors='ignore', bufsize=1
         )
     except FileNotFoundError:
         raise
     except Exception as e:
-        print(f"\n{RED}[-] Не удалось запустить процесс загрузки: {e}{CLR}")
+        print(tr("popen_err", e=e))
         log_line(f"Popen error: {e}")
         return False, False, True
 
@@ -573,7 +720,7 @@ def execute_and_stream_output(cmd, platform):
             if match_item:
                 current_track_num = match_item.group(1)
                 total_tracks = match_item.group(2)
-                print(f"\n\n{WHITE}{BOLD}[Плейлист] Обработка трека {current_track_num} из {total_tracks}...{CLR}")
+                print(tr("playlist_track", curr=current_track_num, total=total_tracks))
 
         if platform in ["YouTube", "SoundCloud"]:
             if "[download]" in line_str and "%" in line_str and "ETA" in line_str:
@@ -582,28 +729,27 @@ def execute_and_stream_output(cmd, platform):
                     pct = float(match.group(1))
                     speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
                     speed_text = speed_match.group(1) if speed_match else ""
-                    render_progress_bar(pct, f"Загрузка #{current_track_num if current_track_num else 1} ", speed_text)
+                    render_progress_bar(pct, tr("downloading_num", num=current_track_num if current_track_num else 1), speed_text)
             elif "[ExtractAudio]" in line_str:
-                print(f"\n{YELLOW}[*] Извлечение аудиопотока...{CLR}")
+                print(tr("extract_audio"))
             elif "[ThumbnailsConvertor]" in line_str or "embed-thumbnail" in line_str.lower():
-                print(f"{YELLOW}[*] Обработка обложки...{CLR}")
+                print(tr("process_cover"))
             elif "[Metadata]" in line_str or "embed-metadata" in line_str.lower():
-                print(f"{YELLOW}[*] Сохранение метаданных...{CLR}")
+                print(tr("save_meta"))
 
         elif platform == "Spotify":
             if "Fetching" in line_str or "Searching" in line_str or "Found" in line_str:
-                print(f"\n{YELLOW}[*] Поиск трека в базе данных...{CLR}")
+                print(tr("fetching_db"))
             elif "Downloading" in line_str or "Downloaded" in line_str:
                 match = re.search(r'(\d+)%', line_str)
                 pct = float(match.group(1)) if match else 100.0
-                render_progress_bar(pct, "Загрузка аудио")
+                render_progress_bar(pct, tr("download_audio"))
             elif "Converting" in line_str or "Processing" in line_str:
-                print(f"\n{YELLOW}[*] Применение тегов и финализация...{CLR}")
+                print(tr("applying_tags"))
 
     process.wait()
 
     format_not_available = any("Requested format is not available" in l for l in error_logs)
-
     files_after = get_media_files_snapshot(SAVE_PATH)
     new_files = files_after - files_before
     already_had_file = any(
@@ -616,7 +762,7 @@ def execute_and_stream_output(cmd, platform):
         log_line(l)
 
     if not disk_confirmed:
-        print(f"\n\n{RED}[-] Файлы не сохранены. Лог утилиты:{CLR}")
+        print(tr("files_not_saved"))
         for err_line in error_logs:
             if "ETA" not in err_line:
                 print(f"{RED} > {err_line}{CLR}")
@@ -625,17 +771,13 @@ def execute_and_stream_output(cmd, platform):
         return False, format_not_available, has_errors
 
     if new_files:
-        print(f"\n{GREEN}[+] Успешно сохранено файлов: {len(new_files)}{CLR}")
+        print(tr("files_saved", count=len(new_files)))
 
     return True, format_not_available, has_errors
 
 def build_common_ytdlp_args(retry=False):
-    """Общие аргументы yt-dlp (метаданные, ffmpeg, скорость, cookies), без формата/шаблона/URL."""
     ffmpeg_target = FFMPEG_DIR if FFMPEG_DIR else "ffmpeg"
-
-    # Использование резервных клиентов при повторной попытке загрузки
     player_clients = "tv,web_safari" if retry else "ios,mweb,tv"
-
     args = [
         "--ffmpeg-location", ffmpeg_target,
         "--ignore-errors",
@@ -653,7 +795,6 @@ def build_common_ytdlp_args(retry=False):
     return args
 
 def _format_specific_args(file_type, retry):
-    """Возвращает (аргументы формата/кодека, дополнительные постобработочные аргументы)."""
     if file_type == "mp3":
         fmt = "best" if retry else "bestaudio[abr>0]/bestaudio/best"
         return (
@@ -673,31 +814,21 @@ def _format_specific_args(file_type, retry):
 def build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, retry=False):
     output_template = "%(playlist_index)02d - %(title)s.%(ext)s" if is_playlist else "%(title)s.%(ext)s"
     pre_fmt, post_fmt = _format_specific_args(file_type, retry)
-
     cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(retry) + post_fmt
-
     if not is_playlist:
         cmd.append("--no-playlist")
-
     cmd.append(url)
     return cmd
 
 def build_ytdlp_command_multi(ytdlp_bin, urls, file_type, retry=False):
-    """Команда для загрузки уже готового списка КОНКРЕТНЫХ ссылок (не плейлиста целиком).
-    Используется параллельными воркерами после однократного извлечения списка плейлиста
-    функцией extract_playlist_video_urls, чтобы каждый поток не парсил страницу плейлиста заново."""
     output_template = "%(title)s.%(ext)s"
     pre_fmt, post_fmt = _format_specific_args(file_type, retry)
-
     cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(retry) + post_fmt
     cmd.append("--no-playlist")
     cmd.extend(urls)
     return cmd
 
 def extract_playlist_video_urls(ytdlp_bin, url):
-    """Извлекает список прямых ссылок на все элементы плейлиста ОДНИМ запросом (--flat-playlist),
-    чтобы параллельные воркеры не запрашивали и не парсили страницу плейлиста заново каждый по
-    отдельности — это и стабильнее, и заметно снижает число запросов к сайту (anti-ban)."""
     cmd = [ytdlp_bin, "--flat-playlist", "--print", "webpage_url", "--no-warnings", "--ignore-errors"]
     cmd.extend(get_cookies_args())
     cmd.append(url)
@@ -716,18 +847,12 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
     try:
         try:
             process = subprocess.Popen(
-                cmd,
-                cwd=SAVE_PATH,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                encoding='utf-8',
-                errors='ignore',
-                bufsize=1
+                cmd, cwd=SAVE_PATH, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                universal_newlines=True, encoding='utf-8', errors='ignore', bufsize=1
             )
         except Exception as e:
             with print_lock:
-                shared_error_logs.append(f"[-] Поток {worker_id} не смог запуститься: {e}")
+                shared_error_logs.append(tr("thread_start_err", id=worker_id, e=e))
             return False, True
 
         last_bucket = -1
@@ -763,7 +888,7 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
                         speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
                         speed_text = f" ({speed_match.group(1)})" if speed_match else ""
                         with print_lock:
-                            print(f"{CYAN}[Поток {worker_id}]{CLR} {GREEN}{pct:>5.1f}%{CLR}{speed_text}")
+                            print(tr("thread_progress", id=worker_id, pct=pct, speed=speed_text))
 
         process.wait()
         with print_lock:
@@ -772,11 +897,11 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
 
     except Exception as e:
         with print_lock:
-            shared_error_logs.append(f"[-] Ошибка потока {worker_id}: {e}")
+            shared_error_logs.append(tr("thread_err", id=worker_id, e=e))
         return False, True
 
 def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
-    print(f"{CYAN}[*] Получение списка элементов плейлиста (один запрос)...{CLR}")
+    print(tr("playlist_fetch"))
     entries = extract_playlist_video_urls(ytdlp_bin, url)
 
     files_before = get_media_files_snapshot(SAVE_PATH)
@@ -784,27 +909,20 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
     shared_error_logs = []
 
     if entries:
-        # Список получен один раз — распределяем готовые ссылки между воркерами.
-        # Так каждый поток скачивает свою часть напрямую, не парся плейлист заново.
         workers = max(1, min(PLAYLIST_WORKERS, len(entries)))
-        print(f"{CYAN}[*] Найдено элементов: {len(entries)}. Загрузка в {workers} поток(а/ов)...{CLR}\n")
+        print(tr("playlist_found", count=len(entries), workers=workers))
         chunks = [entries[i::workers] for i in range(workers)]
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = []
             for i, chunk in enumerate(chunks):
-                if not chunk:
-                    continue
+                if not chunk: continue
                 cmd = build_ytdlp_command_multi(ytdlp_bin, chunk, file_type, retry=retry)
                 futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
             results = [f.result() for f in futures]
     else:
-        # Резервный вариант: не удалось получить список заранее (например, приватный
-        # плейлист или сбой сети) — используем встроенное распределение yt-dlp
-        # по --playlist-items, как раньше.
         workers = PLAYLIST_WORKERS
-        print(f"{YELLOW}[~] Не удалось получить список плейлиста заранее, использую резервный режим "
-              f"({workers} потоков)...{CLR}\n")
+        print(tr("playlist_fallback", workers=workers))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = []
             for i in range(workers):
@@ -828,9 +946,9 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
         log_line(l)
 
     if new_files:
-        print(f"\n{GREEN}[+] Успешно сохранено файлов: {len(new_files)}{CLR}")
+        print(tr("files_saved", count=len(new_files)))
     elif not disk_confirmed:
-        print(f"\n{RED}[-] Ни один поток не сохранил файлы.{CLR}")
+        print(tr("no_files_saved"))
         for err_line in shared_error_logs[-15:]:
             if "ETA" not in err_line:
                 print(f"{RED} > {err_line}{CLR}")
@@ -843,18 +961,18 @@ def start_download_process(url, file_type, ytdlp_bin):
     url = clean_url(url)
     platform = get_platform(url)
     if not platform:
-        print(f"\n{RED}[-] Ошибка: Платформа не поддерживается.{CLR}")
+        print(tr("unsupported_platform"))
         return
 
-    print(f"\n{GREEN}[+] Источник: {BOLD}{platform}{CLR} | {GREEN}Формат: {BOLD}{file_type.upper()}{CLR}")
-    print(f"{CYAN}[*] Запуск обработки...{CLR}\n")
+    print(tr("source", platform=platform, fmt=file_type.upper()))
+    print(tr("starting"))
 
     is_playlist = is_playlist_url(url)
     ffmpeg_exe = os.path.join(FFMPEG_DIR, "ffmpeg.exe") if FFMPEG_DIR else "ffmpeg"
 
     if platform == "Spotify":
         if not ensure_spotdl_installed():
-            print(f"\n{RED}[-] spotdl недоступен, загрузка отменена.{CLR}")
+            print(tr("spotdl_not_avail"))
             return
 
         if file_type == "mp4":
@@ -874,7 +992,7 @@ def start_download_process(url, file_type, ytdlp_bin):
         try:
             success, _, has_errors = execute_and_stream_output(cmd, platform)
         except FileNotFoundError:
-            print(f"\n{RED}[-] Модуль spotdl не найден.{CLR}")
+            print(tr("spotdl_not_found"))
             success = False
             has_errors = True
 
@@ -886,13 +1004,13 @@ def start_download_process(url, file_type, ytdlp_bin):
             try:
                 success, format_not_available, has_errors = execute_and_stream_output(cmd, platform)
             except FileNotFoundError:
-                print(f"\n{RED}[-] Утилита yt-dlp не найдена.{CLR}")
+                print(tr("ytdlp_not_found"))
                 success = False
                 format_not_available = False
                 has_errors = True
 
         if not success and format_not_available:
-            print(f"\n{YELLOW}[~] Основные клиенты недоступны. Запуск резервного варианта...{CLR}\n")
+            print(tr("fallback_start"))
             if is_playlist and PLAYLIST_WORKERS > 1:
                 success, _, has_errors = process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=True)
             else:
@@ -900,29 +1018,25 @@ def start_download_process(url, file_type, ytdlp_bin):
                 try:
                     success, _, has_errors = execute_and_stream_output(retry_cmd, platform)
                 except FileNotFoundError:
-                    print(f"\n{RED}[-] Утилита yt-dlp не найдена.{CLR}")
+                    print(tr("ytdlp_not_found"))
                     success = False
                     has_errors = True
 
-    print(f"\n{CYAN}──────────────────────────────────────────────────{CLR}")
+    print(tr("separator"))
     if success:
         if is_playlist and has_errors:
-            print(f"{YELLOW}{BOLD}[~] Загрузка завершена (Частичный успех: некоторые файлы пропущены){CLR}")
+            print(tr("partial_success"))
         else:
-            print(f"{GREEN}{BOLD}[+] Загрузка успешно завершена{CLR}")
-        print(f"{WHITE}    Директория: {SAVE_PATH}{CLR}")
+            print(tr("success"))
+        print(tr("saved_dir", path=SAVE_PATH))
     else:
-        print(f"{RED}[-] Загрузка прервана из-за ошибки.{CLR}")
+        print(tr("aborted"))
         if platform != "Spotify" and not os.path.exists(COOKIES_PATH):
-            print(f"{YELLOW}[~] Если ошибка связана с авторизацией — попробуйте закрыть Chrome "
-                  f"или указать готовый cookies.txt через NOVADL_COOKIES_PATH.{CLR}")
-    print(f"{CYAN}──────────────────────────────────────────────────{CLR}")
+            print(tr("aborted_cookie_hint"))
+    print(tr("separator"))
 
-def read_menu_choice():
-    """Считывает выбор пункта меню (1-3). На Windows — посимвольно с видимой обратной связью
-    на неверный ввод, на прочих платформах — через input() с валидацией и повтором запроса."""
+def read_menu_choice(prompt_key="input_1_2_3", unix_prompt="input_1_2_3_unix"):
     valid = ('1', '2', '3')
-
     if os.name == 'nt':
         while True:
             ch = msvcrt.getch()
@@ -933,18 +1047,41 @@ def read_menu_choice():
             except Exception:
                 continue
             if ch_str in valid:
-                print(ch_str)  # эхо выбранной цифры, чтобы было видно, что нажатие принято
+                print(ch_str)
                 return ch_str
             if ch_str in ('\r', '\n'):
                 continue
-            sys.stdout.write(f"\r{YELLOW}[~] Нажмите 1, 2 или 3...{CLR}   ")
+            sys.stdout.write(tr(prompt_key))
             sys.stdout.flush()
     else:
         while True:
-            choice = input(f"{WHITE}Выбор (1-3):{CLR} ").strip()
+            choice = input(tr(unix_prompt)).strip()
             if choice in valid:
                 return choice
-            print(f"{YELLOW}[~] Нужно ввести 1, 2 или 3.{CLR}")
+            print(tr("input_1_2_3_warn"))
+
+def show_settings_menu():
+    global CURRENT_LANG
+    while True:
+        clear_screen()
+        print(tr("settings_title"))
+        print(tr("settings_opt1"))
+        print(tr("settings_opt2"))
+        print(tr("settings_opt3"))
+        print(tr("separator"))
+        
+        c = read_menu_choice("settings_prompt", "settings_prompt")
+        
+        if c == '1':
+            prompt_change_save_directory()
+            input(tr("press_enter"))
+        elif c == '2':
+            CURRENT_LANG = "en" if CURRENT_LANG == "ru" else "ru"
+            cfg = _load_config()
+            cfg["language"] = CURRENT_LANG
+            _save_config(cfg)
+        elif c == '3':
+            break
 
 def main():
     ensure_save_directory()
@@ -964,26 +1101,33 @@ def main():
 
     while True:
         clear_screen()
-        print(f"{CYAN}NovaDL  |  v1.1.0{CLR}")
-        print(f"{CYAN}──────────────────────────────────────────────────{CLR}")
-        print(f"{WHITE}• Сохранение:  {YELLOW}{SAVE_PATH}{CLR}")
-        print(f"{WHITE}• Файл куки:   {GREEN}{'Активен' if os.path.exists(COOKIES_PATH) else 'Не найден (используется браузер)'}{CLR}")
-        print(f"{WHITE}• FFmpeg:      {GREEN if FFMPEG_DIR else RED}{FFMPEG_DIR if FFMPEG_DIR else 'Не найден'}{CLR}")
-        print(f"{CYAN}──────────────────────────────────────────────────{CLR}")
+        print(tr("main_title"))
+        print(tr("separator"))
+        print(tr("main_save", path=SAVE_PATH))
+        
+        cookie_status = tr("cookie_active") if os.path.exists(COOKIES_PATH) else tr("cookie_browser")
+        cookie_color = GREEN if os.path.exists(COOKIES_PATH) else YELLOW
+        print(tr("main_cookie", color=cookie_color, status=cookie_status))
+        
+        ffmpeg_status = FFMPEG_DIR if FFMPEG_DIR else tr("ffmpeg_not_found_status")
+        ffmpeg_color = GREEN if FFMPEG_DIR else RED
+        print(tr("main_ffmpeg", color=ffmpeg_color, status=ffmpeg_status))
+        
+        print(tr("main_lang"))
+        print(tr("separator"))
 
-        url = input(f"{WHITE}URL (0 - настройки, Enter - выход):{CLR} ").strip()
+        url = input(tr("url_prompt")).strip()
         if not url: break
 
         if url == '0':
-            prompt_change_save_directory()
-            input(f"\n{WHITE}Нажмите Enter для продолжения...{CLR}")
+            show_settings_menu()
             continue
 
-        print(f"\n{WHITE}Выберите формат:{CLR}")
-        print(f" {GREEN}1.{CLR} MP3  {WHITE}(Аудио 320kbps + обложка + теги){CLR}")
-        print(f" {GREEN}2.{CLR} WAV  {WHITE}(Lossless аудио без сжатия){CLR}")
-        print(f" {GREEN}3.{CLR} MP4  {WHITE}(Видео в максимальном качестве){CLR}")
-        print(f"{CYAN}──────────────────────────────────────────────────{CLR}")
+        print(tr("choose_format"))
+        print(tr("fmt_mp3"))
+        print(tr("fmt_wav"))
+        print(tr("fmt_mp4"))
+        print(tr("separator"))
 
         choice = read_menu_choice()
 
@@ -996,10 +1140,10 @@ def main():
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            print(f"\n{RED}[-] Системная ошибка: {e}{CLR}")
+            print(tr("sys_err", e=e))
             log_line(f"Системная ошибка: {e}")
 
-        input(f"\n{WHITE}Нажмите Enter для продолжения...{CLR}")
+        input(tr("press_enter"))
 
 if __name__ == "__main__":
     try:
