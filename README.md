@@ -56,3 +56,9 @@ Run the following command in your terminal to clone the repository and start the
 ```bash
 git clone https://github.com/W3rzzzy/NovaDL.git && cd NovaDL && python NovaDL.py
 ```
+
+## License 📜
+This project is licensed under the **GNU Affero General Public License v3 (AGPLv3)**. 
+
+⚠️ **Warning for Forks and Deployments:**
+If you modify this software or host it on a network server (e.g., website, API, or cloud service), you **MUST** make your modified source code publicly available under the same AGPLv3 license. Removal of copyright notices or hidden hosting will result in an immediate DMCA takedown notice.
