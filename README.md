@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.8%2B-blue" alt="Python">
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT">
+  <img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License: AGPL-3.0">
 </p>
 
 NovaDL is a high-performance, command-line media downloader built on top of **yt-dlp** and **spotdl**. It fully automates downloading, metadata tagging, and playlist processing across multiple platforms while managing external dependencies and fallback mechanisms automatically.
