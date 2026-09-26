@@ -1,16 +1,4 @@
-#  NovaDL - Fast CLI Media Downloader
-#  Copyright (C) 2026 W3rzzzy
-#
-#  This program is free software: you can redistribute it and/or modify
-#  it under the terms of the GNU Affero General Public License as published by
-#  the Free Software Foundation, either version 3 of the License, or
-#  (at your option) any later version.
-#
-#  This program is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU Affero General Public License for more details.import os
-
+import os
 import sys
 import subprocess
 import re
@@ -26,6 +14,7 @@ import shutil
 import threading
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
+import collections
 
 if os.name == 'nt':
     import msvcrt
@@ -116,6 +105,9 @@ TRANSLATIONS = {
         "cookie_chrome_warn": "{YELLOW}[~] Если Chrome сейчас открыт, это иногда мешает чтению его базы cookies — при ошибке закройте браузер или подготовьте свой cookies.txt (см. README).{CLR}",
         "cookie_issue_hint1": "\n{YELLOW}[~] Похоже, не удалось прочитать cookies из Chrome — браузер может быть открыт, а его база cookies временно заблокирована.{CLR}",
         "cookie_issue_hint2": "{YELLOW}[~] Закройте Chrome и повторите попытку, либо экспортируйте cookies.txt (расширение 'Get cookies.txt LOCALLY') и укажите путь через NOVADL_COOKIES_PATH.{CLR}",
+        "fs_permission_hint1": "\n{YELLOW}[~] Не удалось записать файл в папку загрузки — система отказала в доступе (Permission denied).{CLR}",
+        "fs_permission_hint2": "{YELLOW}[~] Частые причины: папка защищена 'Контролируемым доступом к папкам' Windows (Defender) или антивирусом; файл с таким именем уже открыт в другой программе или помечен 'только для чтения'; папка на OneDrive временно заблокирована синхронизацией. Попробуйте сменить папку загрузки (пункт '0' в меню) на другую, например обычную папку не под OneDrive, либо добавьте NovaDL в исключения антивируса/Controlled folder access.{CLR}",
+        "cookie_retry_no_auth": "{YELLOW}[~] Не удалось прочитать cookies из Chrome — повторяю попытку без авторизации (без cookies).{CLR}",
         "popen_err": "\n{RED}[-] Не удалось запустить процесс загрузки: {e}{CLR}",
         "playlist_track": "\n\n{WHITE}{BOLD}[Плейлист] Обработка трека {curr} из {total}...{CLR}",
         "downloading_num": "Загрузка #{num} ",
@@ -136,6 +128,7 @@ TRANSLATIONS = {
         "no_files_saved": "\n{RED}[-] Ни один поток не сохранил файлы.{CLR}",
         "unsupported_platform": "\n{RED}[-] Ошибка: Платформа не поддерживается.{CLR}",
         "source": "\n{GREEN}[+] Источник: {BOLD}{platform}{CLR} | {GREEN}Формат: {BOLD}{fmt}{CLR}",
+        "multi_urls_summary": "\n{GREEN}[+] Ссылок: {BOLD}{count}{CLR} | {GREEN}Формат: {BOLD}{fmt}{CLR}",
         "starting": "{CYAN}[*] Запуск обработки...{CLR}\n",
         "spotdl_not_avail": "\n{RED}[-] spotdl недоступен, загрузка отменена.{CLR}",
         "spotdl_not_found": "\n{RED}[-] Модуль spotdl не найден.{CLR}",
@@ -161,15 +154,28 @@ TRANSLATIONS = {
         "url_prompt": "{WHITE}URL (0 - настройки, Enter - выход):{CLR} ",
         "press_enter": "\n{WHITE}Нажмите Enter для продолжения...{CLR}",
         "choose_format": "\n{WHITE}Выберите формат:{CLR}",
-        "fmt_mp3": " {GREEN}1.{CLR} MP3  {WHITE}(Аудио 320kbps + обложка + теги){CLR}",
-        "fmt_wav": " {GREEN}2.{CLR} WAV  {WHITE}(Lossless аудио без сжатия){CLR}",
-        "fmt_mp4": " {GREEN}3.{CLR} MP4  {WHITE}(Видео в максимальном качестве){CLR}",
+        "fmt_mp3": " {GREEN}1.{CLR}  ♪  MP3   {WHITE}320kbps · обложка · теги{CLR}",
+        "fmt_wav": " {GREEN}2.{CLR}  ◈  WAV   {WHITE}Lossless · без сжатия{CLR}",
+        "fmt_mp4": " {GREEN}3.{CLR}  ▶  MP4   {WHITE}Видео в максимальном качестве{CLR}",
         "sys_err": "\n{RED}[-] Системная ошибка: {e}{CLR}",
         "settings_title": "\n{WHITE}НАСТРОЙКИ (SETTINGS):{CLR}",
         "settings_opt1": " {GREEN}1.{CLR} Изменить директорию сохранения (Change save path)",
         "settings_opt2": " {GREEN}2.{CLR} Изменить язык (Change language)",
         "settings_opt3": " {GREEN}3.{CLR} Назад (Back)",
-        "settings_prompt": "{WHITE}Выбор / Choice (1-3):{CLR} "
+        "settings_prompt": "{WHITE}Выбор / Choice (1-3):{CLR} ",
+        "quality_probing": "{CYAN}[*] Определяю максимальное доступное качество видео...{CLR}",
+        "quality_probe_failed": "{YELLOW}[~] Не удалось определить качество ролика заранее — будет использовано наилучшее доступное.{CLR}",
+        "quality_menu_title": "\n{WHITE}Максимальное качество этого видео: {GREEN}{height}p{CLR}. Выберите качество для загрузки:{CLR}",
+        "quality_max_label": "максимальное",
+        "quality_prompt": "{WHITE}Выбор (1-{max_num}, Enter - максимальное):{CLR} ",
+        "quality_invalid": "{YELLOW}[~] Введите число из списка.{CLR}",
+        "playlist_v_ignored": "{YELLOW}[~] Ссылка содержит плейлист, но также параметр v= (конкретное видео). Будет скачано только это видео. Для загрузки плейлиста уберите v= из URL.{CLR}",
+        "result_time": "{WHITE}    Время: {elapsed}{CLR}",
+        "mode_single": "Одиночное",
+        "mode_playlist": "Плейлист",
+        "mode_multi": "Несколько ссылок",
+        "platform_label": "Платформа",
+        "mode_label": "Режим",
     },
     "en": {
         "curr_dir": "\n{WHITE}Current directory:{CLR} {YELLOW}{save_path}{CLR}",
@@ -202,6 +208,9 @@ TRANSLATIONS = {
         "cookie_chrome_warn": "{YELLOW}[~] If Chrome is currently open, it may block access to its cookie database. Close it if an error occurs, or prepare a cookies.txt file.{CLR}",
         "cookie_issue_hint1": "\n{YELLOW}[~] It seems cookie extraction from Chrome failed. The browser might be open and locking the database.{CLR}",
         "cookie_issue_hint2": "{YELLOW}[~] Close Chrome and try again, or export cookies.txt (extension 'Get cookies.txt LOCALLY') and set NOVADL_COOKIES_PATH.{CLR}",
+        "fs_permission_hint1": "\n{YELLOW}[~] Could not write a file to the download folder — the OS denied access (Permission denied).{CLR}",
+        "fs_permission_hint2": "{YELLOW}[~] Common causes: the folder is protected by Windows 'Controlled folder access' (Defender) or antivirus; a file with the same name is open in another program or marked read-only; the OneDrive folder is temporarily locked by sync. Try changing the download folder (option '0' in the menu) to a plain, non-OneDrive folder, or add NovaDL to your antivirus/Controlled folder access exceptions.{CLR}",
+        "cookie_retry_no_auth": "{YELLOW}[~] Failed to read cookies from Chrome — retrying without authentication (no cookies).{CLR}",
         "popen_err": "\n{RED}[-] Failed to start download process: {e}{CLR}",
         "playlist_track": "\n\n{WHITE}{BOLD}[Playlist] Processing track {curr} of {total}...{CLR}",
         "downloading_num": "Downloading #{num} ",
@@ -222,6 +231,7 @@ TRANSLATIONS = {
         "no_files_saved": "\n{RED}[-] No threads saved any files.{CLR}",
         "unsupported_platform": "\n{RED}[-] Error: Platform not supported.{CLR}",
         "source": "\n{GREEN}[+] Source: {BOLD}{platform}{CLR} | {GREEN}Format: {BOLD}{fmt}{CLR}",
+        "multi_urls_summary": "\n{GREEN}[+] Links: {BOLD}{count}{CLR} | {GREEN}Format: {BOLD}{fmt}{CLR}",
         "starting": "{CYAN}[*] Starting process...{CLR}\n",
         "spotdl_not_avail": "\n{RED}[-] spotdl is unavailable, download aborted.{CLR}",
         "spotdl_not_found": "\n{RED}[-] spotdl module not found.{CLR}",
@@ -247,15 +257,28 @@ TRANSLATIONS = {
         "url_prompt": "{WHITE}URL (0 - settings, Enter - exit):{CLR} ",
         "press_enter": "\n{WHITE}Press Enter to continue...{CLR}",
         "choose_format": "\n{WHITE}Choose format:{CLR}",
-        "fmt_mp3": " {GREEN}1.{CLR} MP3  {WHITE}(Audio 320kbps + cover + tags){CLR}",
-        "fmt_wav": " {GREEN}2.{CLR} WAV  {WHITE}(Lossless audio uncompressed){CLR}",
-        "fmt_mp4": " {GREEN}3.{CLR} MP4  {WHITE}(Video in max quality){CLR}",
+        "fmt_mp3": " {GREEN}1.{CLR}  ♪  MP3   {WHITE}320kbps · cover · tags{CLR}",
+        "fmt_wav": " {GREEN}2.{CLR}  ◈  WAV   {WHITE}Lossless · uncompressed{CLR}",
+        "fmt_mp4": " {GREEN}3.{CLR}  ▶  MP4   {WHITE}Video in max quality{CLR}",
         "sys_err": "\n{RED}[-] System error: {e}{CLR}",
         "settings_title": "\n{WHITE}SETTINGS:{CLR}",
         "settings_opt1": " {GREEN}1.{CLR} Change save directory",
         "settings_opt2": " {GREEN}2.{CLR} Change language (RU / EN)",
         "settings_opt3": " {GREEN}3.{CLR} Back",
-        "settings_prompt": "{WHITE}Choice (1-3):{CLR} "
+        "settings_prompt": "{WHITE}Choice (1-3):{CLR} ",
+        "quality_probing": "{CYAN}[*] Detecting the maximum available video quality...{CLR}",
+        "quality_probe_failed": "{YELLOW}[~] Could not detect quality in advance — best available quality will be used.{CLR}",
+        "quality_menu_title": "\n{WHITE}Maximum quality for this video: {GREEN}{height}p{CLR}. Choose a quality to download:{CLR}",
+        "quality_max_label": "maximum",
+        "quality_prompt": "{WHITE}Choice (1-{max_num}, Enter - maximum):{CLR} ",
+        "quality_invalid": "{YELLOW}[~] Please enter a number from the list.{CLR}",
+        "playlist_v_ignored": "{YELLOW}[~] URL contains a playlist but also v= (specific video). Only this video will be downloaded. Remove v= from the URL to download the full playlist.{CLR}",
+        "result_time": "{WHITE}    Time: {elapsed}{CLR}",
+        "mode_single": "Single",
+        "mode_playlist": "Playlist",
+        "mode_multi": "Multiple URLs",
+        "platform_label": "Platform",
+        "mode_label": "Mode",
     }
 }
 
@@ -359,7 +382,59 @@ UPDATE_STATE_FILE = os.path.join(TOOLS_DIR, "update_state.json")
 UPDATE_INTERVAL_SECONDS = 12 * 60 * 60
 
 def clear_screen():
+    # Принудительно сбрасываем буфер вывода перед очисткой экрана.
+    # Иначе при многопоточной загрузке (несколько ссылок / плейлист) часть
+    # ещё не выведенных строк из потоков может "дорисоваться" уже поверх
+    # очищенного экрана, из-за чего кажется, что старый текст не стёрся.
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.system('cls' if os.name == 'nt' else 'clear')
+
+class LoadingAnimation:
+    BRAILLE = "⣾⣽⣻⢿⡿⣟⣯⣷"
+    DOTS    = "⠁⠃⠇⠏⠟⠿⠟⠏⠇⠃"
+
+    def __init__(self, text, style="braille"):
+        self.text = text.replace('\n', '').rstrip()
+        self.chars = self.BRAILLE if style == "braille" else self.DOTS
+        self.running = False
+        self.thread = None
+
+    def _spin(self):
+        idx = 0
+        while self.running:
+            frame = self.chars[idx % len(self.chars)]
+            sys.stdout.write(f"\r{self.text} {frame}  ")
+            sys.stdout.flush()
+            time.sleep(0.08)
+            idx += 1
+        sys.stdout.write(f"\r{self.text}   \n")
+        sys.stdout.flush()
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+
+_global_anim = None
+
+def start_anim(text, style="braille"):
+    global _global_anim
+    if _global_anim:
+        _global_anim.stop()
+    _global_anim = LoadingAnimation(text, style=style)
+    _global_anim.start()
+
+def stop_anim():
+    global _global_anim
+    if _global_anim:
+        _global_anim.stop()
+        _global_anim = None
 
 def ensure_save_directory():
     if not os.path.exists(SAVE_PATH):
@@ -425,7 +500,7 @@ def ensure_ytdlp():
     if os.name != 'nt':
         return "yt-dlp"
 
-    if os.path.exists(YTDLP_EXE):
+    if os.path.exists(YTDLP_EXE) and os.path.getsize(YTDLP_EXE) > 0:
         return YTDLP_EXE
 
     os.makedirs(TOOLS_DIR, exist_ok=True)
@@ -542,6 +617,7 @@ def ensure_spotdl_installed():
             _spotdl_ready = True
             return True
 
+        stop_anim()
         print(tr("spotdl_deps"))
         for pkg in ("yt-dlp", "yt-dlp-ejs", "spotdl"):
             try:
@@ -581,9 +657,9 @@ def update_spotdl_dependencies_background():
         except Exception:
             pass
 
-CONCURRENT_FRAGMENTS = int(os.environ.get("NOVADL_CONCURRENT_FRAGMENTS", "8"))
+CONCURRENT_FRAGMENTS = int(os.environ.get("NOVADL_CONCURRENT_FRAGMENTS", "16"))
 SPOTDL_THREADS = os.environ.get("NOVADL_SPOTDL_THREADS", "4")
-HTTP_CHUNK_SIZE = os.environ.get("NOVADL_HTTP_CHUNK_SIZE", "10M")
+HTTP_CHUNK_SIZE = os.environ.get("NOVADL_HTTP_CHUNK_SIZE", "16M")
 PLAYLIST_WORKERS = max(1, int(os.environ.get("NOVADL_PLAYLIST_WORKERS", "2")))
 ARIA2_CONNECTIONS = os.environ.get("NOVADL_ARIA2_CONNECTIONS", "8")
 
@@ -605,21 +681,51 @@ def ensure_aria2c_background():
 
 def get_speed_args():
     if _ARIA2C_PATH:
+        # ВАЖНО: googlevideo.com не допускает несколько параллельных
+        # Range-соединений к одному и тому же подписанному URL — все,
+        # кроме первого, получают HTTP 403 (aria2c падает с errorCode=22).
+        # Это не влияет на фрагментированные (DASH/HLS) загрузки, т.к. там
+        # каждый фрагмент — отдельный URL, поэтому параллелизм там
+        # обеспечивает --concurrent-fragments, а не -x/-s aria2c. Именно
+        # поэтому ускоряем именно CONCURRENT_FRAGMENTS (16 вместо 8) и
+        # НЕ трогаем -x/-s — попытка поднять их вернёт те же 403.
+        # "--file-allocation=none" убирает паузу на предварительное
+        # выделение места на диске перед стартом закачки (особенно
+        # заметно на Windows/HDD и в первые секунды загрузки).
         return [
             "--downloader", "aria2c",
-            "--downloader-args", f"aria2c:-x {ARIA2_CONNECTIONS} -s {ARIA2_CONNECTIONS} -k 1M",
+            "--downloader-args",
+            "aria2c:-x 1 -s 1 -k 1M --max-tries=10 --retry-wait=3 --file-allocation=none",
+            "--concurrent-fragments", str(CONCURRENT_FRAGMENTS),
         ]
     return [
         "--concurrent-fragments", str(CONCURRENT_FRAGMENTS),
         "--http-chunk-size", HTTP_CHUNK_SIZE,
+        # ВАЖНО: у встроенного (не aria2c) загрузчика yt-dlp по умолчанию
+        # маленький буфер чтения — это означает больше системных вызовов
+        # на тот же объём данных и заметно бьёт по скорости на быстрых
+        # каналах. Увеличиваем буфер, чтобы меньше "дёргать" диск/сеть.
+        "--buffer-size", "16M",
     ]
+
 
 _cookie_warning_shown = False
 
-def get_cookies_args():
+def get_cookies_args(allow_browser_fallback=True):
     global _cookie_warning_shown
     if os.path.exists(COOKIES_PATH):
         return ["--cookies", COOKIES_PATH]
+
+    if not allow_browser_fallback:
+        # Ранее при сбое чтения cookies.txt (не найден) скрипт ВСЕГДА
+        # принудительно пытался вытащить cookies из Chrome, даже если
+        # это было уже опробовано и не удалось (например, из-за
+        # заблокированной/открытой базы Chrome — "Could not copy Chrome
+        # cookie database"). Из-за этого загрузка публичного контента,
+        # не требующего авторизации вовсе, полностью падала, хотя без
+        # cookies она могла пройти успешно. Теперь вызывающий код может
+        # явно попросить не трогать браузер и просто скачивать анонимно.
+        return []
 
     if not _cookie_warning_shown:
         print(tr("cookie_not_found", path=COOKIES_PATH))
@@ -635,7 +741,6 @@ COOKIE_ISSUE_MARKERS = (
     "database is locked",
     "failed to decrypt",
     "unsupported browser",
-    "permission denied",
 )
 
 def has_cookie_issue(logs):
@@ -647,6 +752,72 @@ def has_cookie_issue(logs):
 def print_cookie_issue_hint():
     print(tr("cookie_issue_hint1"))
     print(tr("cookie_issue_hint2"))
+
+# ВАЖНО: раньше "permission denied" был в COOKIE_ISSUE_MARKERS. Это было
+# неверно: обычная ошибка записи файла на диск (например, "ERROR: [Errno 13]
+# Permission denied" при попытке сохранить обложку/thumbnail в папку
+# загрузки — папка защищена антивирусом/Controlled Folder Access, файл
+# занят другим приложением и т.п.) не имеет никакого отношения к чтению
+# cookies из браузера, но по этому общему слову ошибочно определялась как
+# "проблема с cookies" — пользователю показывались нерелевантные советы
+# про Chrome вместо реальной причины (недоступна папка для записи).
+FS_PERMISSION_MARKERS = (
+    "permission denied",
+    "errno 13",
+)
+
+def has_fs_permission_issue(logs):
+    low = " ".join(l.lower() for l in logs)
+    if not any(marker in low for marker in FS_PERMISSION_MARKERS):
+        return False
+    # Не путать с ошибками чтения cookies из браузера — у тех своя,
+    # более точная диагностика (has_cookie_issue).
+    return not any(marker in low for marker in COOKIE_ISSUE_MARKERS)
+
+def print_fs_permission_hint():
+    print(tr("fs_permission_hint1"))
+    print(tr("fs_permission_hint2"))
+
+# ──────────────────────────────────────────────────────────────────────────
+# АВТОМАТИЧЕСКОЕ ВОССТАНОВЛЕНИЕ ПОСЛЕ ОШИБОК ВЫБОРА КЛИЕНТА/СЕССИИ YOUTUBE
+#
+# "The page needs to be reloaded" — это сигнал innertube API о том, что
+# ответ плеера (playability status) для выбранного клиента (в частности
+# "tv"/TVHTML5) недействителен: клиент требует свежей сессии/визитора,
+# либо у yt-dlp закэширован устаревший player/nsig-код для этого клиента.
+# То же семейство проблем даёт "Sign in to confirm you're not a bot" и
+# "Sign in to confirm your age" — все они означают, что ВЫБРАННЫЙ клиент
+# innertube больше не отдаёт рабочий формат, а не что видео недоступно.
+# Поэтому все такие ошибки обрабатываются как единый класс "нужен другой
+# клиент/чистый кэш" — так же, как и "Requested format is not available":
+# запускается автоматический повтор с другим набором player_client и,
+# при необходимости, с очищенным кэшем yt-dlp.
+# ──────────────────────────────────────────────────────────────────────────
+RETRYABLE_YTDLP_MARKERS = (
+    "requested format is not available",
+    "the page needs to be reloaded",
+    "sign in to confirm you're not a bot",
+    "sign in to confirm your age",
+    "unable to extract initial data",
+)
+
+def is_retryable_ytdlp_error(line_str):
+    low = line_str.lower()
+    return any(marker in low for marker in RETRYABLE_YTDLP_MARKERS)
+
+def clear_ytdlp_cache(ytdlp_bin):
+    # Сбрасывает кэш yt-dlp (в т.ч. закэшированные player/nsig-функции для
+    # клиентов вроде "tv"). Устаревший кэш — частая причина ошибки
+    # "The page needs to be reloaded", т.к. yt-dlp пытается расшифровать
+    # подпись/nsig старым, уже неактуальным кодом плеера YouTube.
+    try:
+        subprocess.run(
+            [ytdlp_bin, "--rm-cache-dir"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+        )
+        log_line("[NovaDL] Кэш yt-dlp очищен из-за ошибки сессии/клиента YouTube.")
+    except Exception:
+        pass
 
 def clean_url(url):
     url = url.strip().strip('"').strip("'")
@@ -674,25 +845,79 @@ def is_playlist_url(url):
     path = parsed.path.lower()
     return any(seg in path for seg in ("/sets/", "/likes", "/reposts", "/playlist/", "/album/"))
 
-def render_progress_bar(percentage, status_text, speed_text=""):
-    width = 30
-    filled_length = int(width * percentage // 100)
-    bar = '█' * filled_length + '░' * (width - filled_length)
-    speed_part = f" {WHITE}{speed_text}{CLR}" if speed_text else ""
-    sys.stdout.write(f"\r{CYAN}[*] {status_text} [{GREEN}{bar}{CYAN}] {percentage:>5.1f}%{speed_part}   ")
+_PARTIAL_BLOCKS = " ▏▎▍▌▋▊▉"
+
+def render_progress_bar(percentage, status_text, speed_text="", width=30, speed_width=13):
+    """Рисует аккуратный прогресс-бар одной строкой (перезаписывает саму себя через \\r).
+
+    Скорость закреплена в колонке справа от бара фиксированной ширины
+    (speed_width), поэтому при изменении длины строки скорости ("1.2MiB/s" ->
+    "980.4KiB/s") бар не "дёргается" и не остаются хвосты от предыдущей строки.
+    """
+    percentage = max(0.0, min(100.0, percentage))
+
+    # Цвет бара мягко меняется по мере прогресса: жёлтый -> голубой -> зелёный.
+    if percentage < 34:
+        bar_color = YELLOW
+    elif percentage < 75:
+        bar_color = CYAN
+    else:
+        bar_color = GREEN
+
+    filled_float = (width * percentage) / 100
+    filled_length = int(filled_float)
+    remainder = filled_float - filled_length
+    partial_idx = int(round(remainder * (len(_PARTIAL_BLOCKS) - 1)))
+
+    bar = '█' * filled_length
+    if filled_length < width and partial_idx > 0:
+        bar += _PARTIAL_BLOCKS[partial_idx]
+        filled_length += 1
+    bar += '░' * (width - filled_length)
+
+    speed_display = f"⇩ {speed_text}" if speed_text else ""
+    speed_part = f" {WHITE}{speed_display:<{speed_width}}{CLR}"
+
+    sys.stdout.write(
+        f"\r{CYAN}[*] {status_text} {WHITE}│{CLR}{bar_color}{bar}{CLR}{WHITE}│{CLR} "
+        f"{BOLD}{percentage:>5.1f}%{CLR}{speed_part}"
+    )
     sys.stdout.flush()
 
 AUDIO_VIDEO_EXTENSIONS = (".mp3", ".wav", ".mp4", ".m4a", ".flac", ".webm", ".ogg", ".opus", ".mkv", ".weba")
 INCOMPLETE_EXTENSIONS = (".part", ".ytdl", ".temp", ".ffmpeg", ".crdownload")
 
 def get_media_files_snapshot(path):
+    # ВАЖНО: возвращает {имя_файла: (размер, mtime_ns)}, а НЕ просто
+    # множество имён. При включённом --force-overwrites (см.
+    # build_common_ytdlp_args) повторная загрузка того же трека
+    # пересоздаёт файл с ТЕМ ЖЕ именем — раньше снимок хранил только
+    # имена, поэтому сравнение "после - до" давало пустое множество
+    # (имя ведь не новое), и успешно перезаписанный файл ошибочно
+    # считался "не сохранённым". Сравнение по (размер, mtime) отличает
+    # пересозданный файл от нетронутого.
     try:
-        return {
-            f for f in os.listdir(path)
-            if f.lower().endswith(AUDIO_VIDEO_EXTENSIONS) and not f.lower().endswith(INCOMPLETE_EXTENSIONS)
-        }
+        snapshot = {}
+        for f in os.listdir(path):
+            low = f.lower()
+            if not low.endswith(AUDIO_VIDEO_EXTENSIONS) or low.endswith(INCOMPLETE_EXTENSIONS):
+                continue
+            try:
+                st = os.stat(os.path.join(path, f))
+                snapshot[f] = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                continue
+        return snapshot
     except Exception:
-        return set()
+        return {}
+
+def diff_media_snapshots(before, after):
+    """Имена файлов, которые появились заново или изменились (перезаписаны) между двумя снимками."""
+    changed = set()
+    for name, meta in after.items():
+        if name not in before or before[name] != meta:
+            changed.add(name)
+    return changed
 
 def execute_and_stream_output(cmd, platform):
     files_before = get_media_files_snapshot(SAVE_PATH)
@@ -703,15 +928,45 @@ def execute_and_stream_output(cmd, platform):
             universal_newlines=True, encoding='utf-8', errors='ignore', bufsize=1
         )
     except FileNotFoundError:
+        stop_anim()
         raise
     except Exception as e:
+        stop_anim()
         print(tr("popen_err", e=e))
         log_line(f"Popen error: {e}")
-        return False, False, True
+        return False, False, True, False
+
+    # Спиннер (start_anim(tr("starting"))), уже запущенный вызывающей
+    # стороной, раньше гасился здесь же — ДО того как процесс успевал
+    # вывести хоть одну строку. yt-dlp/spotdl могут по несколько секунд
+    # молча резолвить форматы или искать трек в базе, и всё это время
+    # экран оставался абсолютно пустым (создавая впечатление, что
+    # анимации вообще нет), пока внезапно не появлялось "Загрузка
+    # завершена". Теперь спиннер продолжает крутиться до первой
+    # содержательной строки, а затем снова включается на каждой "тихой"
+    # паузе между этапами (извлечение аудио, обложка, теги и т.п.) —
+    # и выключается только на время, пока реально идут процентные
+    # обновления прогресс-бара (чтобы не спорить за одну и ту же строку).
+    anim_text = tr("starting")
+    anim_on = True
+
+    def announce(text):
+        nonlocal anim_on, anim_text
+        stop_anim()
+        print(text)
+        anim_text = text
+        start_anim(anim_text)
+        anim_on = True
+
+    def pause_anim_for_progress():
+        nonlocal anim_on
+        if anim_on:
+            stop_anim()
+            anim_on = False
 
     current_track_num = 0
     has_errors = False
-    error_logs = []
+    error_logs = collections.deque(maxlen=15)
 
     while True:
         line = process.stdout.readline()
@@ -721,8 +976,6 @@ def execute_and_stream_output(cmd, platform):
         line_str = line.strip()
         if line_str:
             error_logs.append(line_str)
-            if len(error_logs) > 15:
-                error_logs.pop(0)
 
             if "ERROR:" in line_str or "Failed" in line_str:
                 has_errors = True
@@ -732,40 +985,46 @@ def execute_and_stream_output(cmd, platform):
             if match_item:
                 current_track_num = match_item.group(1)
                 total_tracks = match_item.group(2)
-                print(tr("playlist_track", curr=current_track_num, total=total_tracks))
+                announce(tr("playlist_track", curr=current_track_num, total=total_tracks))
 
         if platform in ["YouTube", "SoundCloud"]:
             if "[download]" in line_str and "%" in line_str and "ETA" in line_str:
                 match = re.search(r'(\d+\.\d+)%', line_str)
                 if match:
+                    pause_anim_for_progress()
                     pct = float(match.group(1))
                     speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
                     speed_text = speed_match.group(1) if speed_match else ""
                     render_progress_bar(pct, tr("downloading_num", num=current_track_num if current_track_num else 1), speed_text)
             elif "[ExtractAudio]" in line_str:
-                print(tr("extract_audio"))
+                announce(tr("extract_audio"))
             elif "[ThumbnailsConvertor]" in line_str or "embed-thumbnail" in line_str.lower():
-                print(tr("process_cover"))
+                announce(tr("process_cover"))
             elif "[Metadata]" in line_str or "embed-metadata" in line_str.lower():
-                print(tr("save_meta"))
+                announce(tr("save_meta"))
 
         elif platform == "Spotify":
             if "Fetching" in line_str or "Searching" in line_str or "Found" in line_str:
-                print(tr("fetching_db"))
+                if anim_text != tr("fetching_db"):
+                    announce(tr("fetching_db"))
             elif "Downloading" in line_str or "Downloaded" in line_str:
+                pause_anim_for_progress()
                 match = re.search(r'(\d+)%', line_str)
                 pct = float(match.group(1)) if match else 100.0
-                render_progress_bar(pct, tr("download_audio"))
+                speed_match = re.search(r'([\d.]+\s?[KMG]?i?B/s)', line_str, re.IGNORECASE)
+                speed_text = speed_match.group(1) if speed_match else ""
+                render_progress_bar(pct, tr("download_audio"), speed_text)
             elif "Converting" in line_str or "Processing" in line_str:
-                print(tr("applying_tags"))
+                announce(tr("applying_tags"))
 
+    stop_anim()
     process.wait()
 
-    format_not_available = any("Requested format is not available" in l for l in error_logs)
+    format_not_available = any(is_retryable_ytdlp_error(l) for l in error_logs)
     files_after = get_media_files_snapshot(SAVE_PATH)
-    new_files = files_after - files_before
+    new_files = diff_media_snapshots(files_before, files_after)
     already_had_file = any(
-        ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower())
+        ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower()) or ("already been downloaded" in l.lower())
         for l in error_logs
     )
     disk_confirmed = bool(new_files) or already_had_file
@@ -773,40 +1032,85 @@ def execute_and_stream_output(cmd, platform):
     for l in error_logs:
         log_line(l)
 
+    cookie_issue = has_cookie_issue(error_logs)
+    fs_permission_issue = has_fs_permission_issue(error_logs)
+
     if not disk_confirmed:
         print(tr("files_not_saved"))
         for err_line in error_logs:
             if "ETA" not in err_line:
                 print(f"{RED} > {err_line}{CLR}")
-        if has_cookie_issue(error_logs):
+        if cookie_issue:
             print_cookie_issue_hint()
-        return False, format_not_available, has_errors
+        elif fs_permission_issue:
+            print_fs_permission_hint()
+        return False, format_not_available, has_errors, cookie_issue
 
     if new_files:
         print(tr("files_saved", count=len(new_files)))
 
-    return True, format_not_available, has_errors
+    return True, format_not_available, has_errors, cookie_issue
 
-def build_common_ytdlp_args(retry=False):
+PLAYER_CLIENT_TIERS = (
+    # ВАЖНО: раньше уровень 0 был "ios,tv_simply" в предположении, что эти
+    # клиенты "обычно не требуют PO Token". Это устарело: по актуальной
+    # PO Token Guide yt-dlp ios требует PO Token для GVS/Player, а
+    # tv_simply — PO Token для GVS. Раньше это не было заметно, потому
+    # что скрипт получал от этих клиентов ТОЛЬКО старый слитый формат
+    # "18" (жёстко 360p) — единственный, что отдаётся без токена — и
+    # тихо на нём и оставался. Как только форматы, требующие токена,
+    # стали видны yt-dlp, попытка их реально скачать стала падать с
+    # HTTP 403 (нет токена — нет доступа), а не улучшать качество.
+    # "default" отдаёт выбор клиента встроенной логике самого yt-dlp,
+    # которая поддерживается мейнтейнерами и уже сама уходит от клиентов,
+    # требующих токен, когда это возможно — поэтому теперь это основной,
+    # самый надёжный вариант.
+    "default",                # Уровень 0 (основной): встроенный выбор клиента yt-dlp.
+    "tv_simply,web_safari",   # Уровень 1 (резервный): другой набор клиентов, если
+                              # основной не подошёл для конкретного видео.
+    "ios,tv_simply",          # Уровень 2 (последний резерв): оставлен на случай видео,
+                              # для которых даже это неожиданно сработает лучше.
+)
+
+def build_common_ytdlp_args(tier=0, no_browser_cookies=False):
     ffmpeg_target = FFMPEG_DIR if FFMPEG_DIR else "ffmpeg"
-    player_clients = "tv,web_safari" if retry else "ios,mweb,tv"
+    tier = max(0, min(tier, len(PLAYER_CLIENT_TIERS) - 1))
+    player_clients = PLAYER_CLIENT_TIERS[tier]
     args = [
         "--ffmpeg-location", ffmpeg_target,
         "--ignore-errors",
-        "--no-warnings",
         "--embed-metadata",
         "--parse-metadata", "%(artist,uploader)s:artist",
         "--parse-metadata", "%(artist,uploader)s:album_artist",
         "--parse-metadata", "%(album)s:album",
         "--windows-filenames",
+        # ВАЖНО: см. комментарий у PLAYER_CLIENT_TIERS — ограничение по
+        # высоте (max_height) реально работает только когда yt-dlp
+        # выбирает клиент, отдающий форматы БЕЗ требования PO Token
+        # (Tier 0 = "default"). Флаг "formats=missing_pot" здесь
+        # намеренно НЕ используется: он заставляет yt-dlp показывать
+        # форматы, требующие токена, которого у нас нет, — из-за чего
+        # выбирался, например, 1080p-формат, но его реальное скачивание
+        # падало с HTTP 403 (см. лог "Download aborted... status=403").
         "--extractor-args", f"youtube:player_client={player_clients}",
         "--remote-components", "ejs:github",
+        "--force-overwrites",
+        "--retries", "10",
+        "--fragment-retries", "10",
+        "--retry-sleep", "3",
     ]
+    # ВАЖНО: раньше здесь стоял "--no-warnings", который скрывал причину
+    # неудачи конкретного клиента (например "Sign in to confirm your age",
+    # "requires purchase", предупреждения о PO Token и т.п.) — в логе
+    # оставалась только финальная общая ошибка "Requested format is not
+    # available" без единой зацепки, почему именно. Убрали флаг, чтобы
+    # реальная причина попадала в лог и её можно было увидеть и
+    # диагностировать, а не гадать вслепую.
     args.extend(get_speed_args())
-    args.extend(get_cookies_args())
+    args.extend(get_cookies_args(allow_browser_fallback=not no_browser_cookies))
     return args
 
-def _format_specific_args(file_type, retry):
+def _format_specific_args(file_type, retry, max_height=None):
     if file_type == "mp3":
         fmt = "best" if retry else "bestaudio[abr>0]/bestaudio/best"
         return (
@@ -817,26 +1121,143 @@ def _format_specific_args(file_type, retry):
         fmt = "best" if retry else "bestaudio[abr>0]/bestaudio/best"
         return (["-f", fmt, "-x", "--audio-format", "wav"], [])
     else:
-        fmt = "best" if retry else "bv*+ba/b/best"
+        # ВАЖНО: раньше здесь была жёстко зашита высота "height<=1080" —
+        # из-за этого видео, у которых реальное максимальное качество
+        # выше 1080p (1440p/4K), принудительно урезались, а если у
+        # конкретного ролика вообще не было отдельного 1080p-варианта,
+        # загрузка могла падать целиком. Теперь потолок качества берётся
+        # из max_height, который выбирает пользователь в меню качества
+        # (choose_video_quality), а верхний пункт этого меню всегда равен
+        # РЕАЛЬНОМУ максимальному качеству именно этого видео
+        # (probe_max_video_height). Если max_height не задан (пользователь
+        # не выбирал качество или определить его не удалось) — ограничение
+        # по высоте не накладывается вовсе, берётся лучшее из доступного.
+        if max_height:
+            fmt = (
+                f"bv*[height<={max_height}]+ba/b[height<={max_height}]/best[height<={max_height}]/best"
+                if retry else
+                f"bv*[height<={max_height}]+ba/b[height<={max_height}]/bv*+ba/b/best"
+            )
+        else:
+            fmt = "best" if retry else "bv*+ba/b/best"
         return (
             ["-f", fmt, "--merge-output-format", "mp4"],
-            ["--embed-thumbnail", "--format-sort", "res,fps,hdr:12,vcodec:av01:vp9:h264,br,size"],
+            # ВАЖНО: раньше сортировка кодеков была "av01:vp9:h264" — то
+            # есть AV1 в приоритете. "--merge-output-format mp4" задаёт
+            # только КОНТЕЙНЕР (расширение файла), а не кодек видео
+            # внутри — поэтому получался файл .mp4, но с видеодорожкой
+            # AV1, которую многие плееры/редакторы/мессенджеры не умеют
+            # проигрывать как обычный mp4 (ожидают H.264). Теперь h264
+            # стоит первым, поэтому при прочих равных (то же разрешение)
+            # выбирается H.264-поток — совместимый mp4, как и просили.
+            ["--embed-thumbnail", "--format-sort", "res,fps,hdr:12,vcodec:h264:vp9:av01,br,size"],
         )
 
-def build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, retry=False):
+QUALITY_TIERS = (2160, 1440, 1080, 720, 480, 360, 240)
+
+def probe_max_video_height(ytdlp_bin, url):
+    """
+    Определяет РЕАЛЬНОЕ максимальное доступное качество (высоту видео в
+    пикселях) для указанной ссылки, опрашивая yt-dlp БЕЗ скачивания
+    самого файла (только метаданные формата "bestvideo"). Для плейлиста
+    берётся первый элемент — этого достаточно, чтобы понять исходное
+    максимальное разрешение ролика/канала для меню выбора качества.
+
+    Возвращает int (высоту в пикселях) или None, если определить не
+    удалось (например, сетевая ошибка, недоступное видео, не-YouTube
+    ссылка) — в этом случае вызывающий код должен использовать вариант
+    "без ограничения по высоте" (лучшее из доступного).
+    """
+    cmd = [
+        ytdlp_bin, "--no-warnings", "--ignore-errors",
+        "--playlist-items", "1",
+        "-f", "bestvideo/best",
+        "--print", "%(height)s",
+    ]
+    cmd.extend(get_cookies_args())
+    cmd.append(url)
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, encoding='utf-8', errors='ignore', timeout=30
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                height = int(line)
+                if height > 0:
+                    return height
+    except Exception as e:
+        log_line(f"Не удалось определить максимальное качество видео: {e}")
+    return None
+
+def choose_video_quality(ytdlp_bin, url):
+    """
+    Показывает пользователю меню выбора качества MP4 сразу после выбора
+    формата (пункт "3"). Верхний пункт меню ВСЕГДА равен реальному
+    максимальному качеству именно этого видео (через
+    probe_max_video_height), а не захардкоженному значению — поэтому,
+    например, 4K-ролик предложит "2160p (максимальное)", а не будет
+    молча урезан до 1080p, как это было раньше.
+
+    Возвращает:
+      - int (высота в пикселях) — выбранный пользователем потолок качества,
+        который затем передаётся в build_ytdlp_command* как max_height;
+      - None — если определить максимальное качество не удалось; в этом
+        случае используется наилучшее доступное качество без ограничения.
+    """
+    start_anim(tr("quality_probing"), style="dots")
+    max_height = probe_max_video_height(ytdlp_bin, url)
+    stop_anim()
+
+    if not max_height:
+        print(tr("quality_probe_failed"))
+        return None
+
+    options = [h for h in QUALITY_TIERS if h < max_height]
+    options.insert(0, max_height)
+
+    print(tr("quality_menu_title", height=max_height))
+    for i, h in enumerate(options, start=1):
+        if h == max_height:
+            print(f"  {GREEN}{i}.{CLR} {WHITE}{h}p{CLR} ({tr('quality_max_label')})")
+        else:
+            print(f"  {GREEN}{i}.{CLR} {WHITE}{h}p{CLR}")
+    print(tr("separator"))
+
+    while True:
+        raw = input(tr("quality_prompt", max_num=len(options))).strip()
+        if not raw:
+            return options[0]
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(options):
+                return options[idx - 1]
+        print(tr("quality_invalid"))
+
+def build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=0, max_height=None, no_browser_cookies=False):
     output_template = "%(playlist_index)02d - %(title)s.%(ext)s" if is_playlist else "%(title)s.%(ext)s"
-    pre_fmt, post_fmt = _format_specific_args(file_type, retry)
-    cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(retry) + post_fmt
+    pre_fmt, post_fmt = _format_specific_args(file_type, tier > 0, max_height)
+    cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(tier, no_browser_cookies) + post_fmt
     if not is_playlist:
         cmd.append("--no-playlist")
     cmd.append(url)
     return cmd
 
-def build_ytdlp_command_multi(ytdlp_bin, urls, file_type, retry=False):
+def build_ytdlp_command_multi(ytdlp_bin, urls, file_type, tier=0, max_height=None, no_browser_cookies=False):
     output_template = "%(title)s.%(ext)s"
-    pre_fmt, post_fmt = _format_specific_args(file_type, retry)
-    cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(retry) + post_fmt
+    pre_fmt, post_fmt = _format_specific_args(file_type, tier > 0, max_height)
+    cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(tier, no_browser_cookies) + post_fmt
     cmd.append("--no-playlist")
+    cmd.extend(urls)
+    return cmd
+
+def build_ytdlp_command_urls(ytdlp_bin, urls, file_type, tier=0, max_height=None, no_browser_cookies=False):
+    # Как build_ytdlp_command_multi, но без --no-playlist: если среди
+    # переданных ссылок окажется плейлист, yt-dlp обработает его целиком.
+    output_template = "%(title)s.%(ext)s"
+    pre_fmt, post_fmt = _format_specific_args(file_type, tier > 0, max_height)
+    cmd = [ytdlp_bin] + pre_fmt + ["-o", output_template] + build_common_ytdlp_args(tier, no_browser_cookies) + post_fmt
     cmd.extend(urls)
     return cmd
 
@@ -868,7 +1289,7 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
             return False, True
 
         last_bucket = -1
-        local_logs = []
+        local_logs = collections.deque(maxlen=15)
         format_not_available = False
         has_error = False
 
@@ -881,10 +1302,8 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
                 continue
 
             local_logs.append(line_str)
-            if len(local_logs) > 15:
-                local_logs.pop(0)
 
-            if "Requested format is not available" in line_str:
+            if is_retryable_ytdlp_error(line_str):
                 format_not_available = True
 
             if "ERROR:" in line_str or "Failed" in line_str:
@@ -894,27 +1313,50 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
                 match = re.search(r'(\d+\.\d+)%', line_str)
                 if match:
                     pct = float(match.group(1))
-                    bucket = int(pct // 20) * 20
+                    # Обновляем строку каждые 5% (а не 10%), чтобы анимация
+                    # выглядела более плавной, но не заваливала консоль
+                    # десятками строк в секунду при частых апдейтах от yt-dlp.
+                    bucket = int(pct // 5) * 5
                     if bucket != last_bucket:
                         last_bucket = bucket
                         speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
-                        speed_text = f" ({speed_match.group(1)})" if speed_match else ""
+                        speed_text = speed_match.group(1) if speed_match else ""
+                        speed_display = f"⇩ {speed_text}" if speed_text else ""
+                        bar_w = 20
+                        if pct < 34:
+                            bar_color = YELLOW
+                        elif pct < 75:
+                            bar_color = CYAN
+                        else:
+                            bar_color = GREEN
+                        filled = int(bar_w * pct / 100)
+                        bar_str = '█' * filled + '░' * (bar_w - filled)
+                        _thr_label = TRANSLATIONS.get(CURRENT_LANG, TRANSLATIONS["ru"]).get(
+                            "thread_progress", "[Поток {id}]").split("{pct")[0].format(
+                            id=worker_id, CLR="", CYAN="", GREEN="")
                         with print_lock:
-                            print(tr("thread_progress", id=worker_id, pct=pct, speed=speed_text))
+                            print(
+                                f"{CYAN}{_thr_label.strip()}{CLR} {WHITE}│{CLR}{bar_color}{bar_str}{CLR}{WHITE}│{CLR} "
+                                f"{BOLD}{pct:>5.1f}%{CLR} {WHITE}{speed_display:<13}{CLR}",
+                                flush=True,
+                            )
 
         process.wait()
+        cookie_issue = has_cookie_issue(local_logs)
         with print_lock:
             shared_error_logs.extend(local_logs)
-        return format_not_available, has_error
+        return format_not_available, has_error, cookie_issue
 
     except Exception as e:
         with print_lock:
             shared_error_logs.append(tr("thread_err", id=worker_id, e=e))
-        return False, True
+        return False, True, False
 
-def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
-    print(tr("playlist_fetch"))
+def process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=0, max_height=None, no_browser_cookies=False):
+    stop_anim()
+    start_anim(tr("playlist_fetch"), style="dots")
     entries = extract_playlist_video_urls(ytdlp_bin, url)
+    stop_anim()
 
     files_before = get_media_files_snapshot(SAVE_PATH)
     print_lock = threading.Lock()
@@ -929,7 +1371,7 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
             futures = []
             for i, chunk in enumerate(chunks):
                 if not chunk: continue
-                cmd = build_ytdlp_command_multi(ytdlp_bin, chunk, file_type, retry=retry)
+                cmd = build_ytdlp_command_multi(ytdlp_bin, chunk, file_type, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
                 futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
             results = [f.result() for f in futures]
     else:
@@ -938,18 +1380,96 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = []
             for i in range(workers):
-                cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist=True, retry=retry)
+                cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist=True, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
                 cmd.extend(["--playlist-items", f"{i + 1}::{workers}"])
                 futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
             results = [f.result() for f in futures]
 
     format_not_available = any(r[0] for r in results) if results else False
     has_errors = any(r[1] for r in results) if results else True
+    cookie_issue = any(r[2] for r in results) if results else False
 
     files_after = get_media_files_snapshot(SAVE_PATH)
-    new_files = files_after - files_before
+    new_files = diff_media_snapshots(files_before, files_after)
     already_had_file = any(
-        ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower())
+        ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower()) or ("already been downloaded" in l.lower())
+        for l in shared_error_logs
+    )
+    disk_confirmed = bool(new_files) or already_had_file
+
+    for l in shared_error_logs:
+        log_line(l)
+
+    if new_files:
+        print(tr("files_saved", count=len(new_files)))
+    elif not disk_confirmed:
+        print(tr("no_files_saved"))
+        for err_line in shared_error_logs[-15:]:
+            if "ETA" not in err_line:
+                print(f"{RED} > {err_line}{CLR}")
+        if cookie_issue:
+            print_cookie_issue_hint()
+
+    return disk_confirmed, format_not_available, has_errors, cookie_issue
+
+def download_urls_parallel(ytdlp_bin, urls, file_type, max_height=None):
+    stop_anim()
+    # Та же система, что используется для параллельной загрузки плейлиста
+    # (execute_playlist_worker + ThreadPoolExecutor), но воркерам раздаются
+    # не элементы одного плейлиста, а разные ссылки, введённые пользователем.
+    files_before = get_media_files_snapshot(SAVE_PATH)
+    print_lock = threading.Lock()
+    shared_error_logs = []
+
+    def run_batch(batch_urls, tier, no_browser_cookies=False):
+        workers = max(1, min(PLAYLIST_WORKERS, len(batch_urls)))
+        chunks = [batch_urls[i::workers] for i in range(workers)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = []
+            for i, chunk in enumerate(chunks):
+                if not chunk: continue
+                cmd = build_ytdlp_command_urls(ytdlp_bin, chunk, file_type, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
+                futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
+            return [f.result() for f in futures]
+
+    print(tr("playlist_found", count=len(urls), workers=max(1, min(PLAYLIST_WORKERS, len(urls)))))
+    no_browser_cookies = False
+    results = run_batch(urls, tier=0, no_browser_cookies=no_browser_cookies)
+
+    format_not_available = any(r[0] for r in results) if results else False
+    has_errors = any(r[1] for r in results) if results else True
+    cookie_issue = any(r[2] for r in results) if results else False
+
+    # Если проблема именно в чтении cookies из браузера (например, Chrome
+    # открыт и блокирует свою базу), переключение "уровней клиента"
+    # YouTube тут не поможет — причина не в клиенте, а в самих cookies.
+    # Поэтому один раз пробуем повторить пакет вовсе без cookies: многие
+    # публичные треки/видео не требуют авторизации.
+    if cookie_issue and not no_browser_cookies and not os.path.exists(COOKIES_PATH):
+        print(tr("cookie_retry_no_auth"))
+        no_browser_cookies = True
+        results = run_batch(urls, tier=0, no_browser_cookies=no_browser_cookies)
+        format_not_available = any(r[0] for r in results) if results else False
+        has_errors = any(r[1] for r in results) if results else True
+        cookie_issue = any(r[2] for r in results) if results else False
+
+    # Перебираем ВСЕ уровни клиентов (см. PLAYER_CLIENT_TIERS) по очереди,
+    # а не только один резервный вариант, — так шанс скачать конкретное
+    # проблемное видео (возрастное ограничение, нестандартный набор
+    # форматов и т.п.) сохраняется даже если первый резерв тоже не подошёл.
+    tier = 1
+    while format_not_available and tier < len(PLAYER_CLIENT_TIERS):
+        print(tr("fallback_start"))
+        clear_ytdlp_cache(ytdlp_bin)
+        results = run_batch(urls, tier=tier, no_browser_cookies=no_browser_cookies)
+        format_not_available = any(r[0] for r in results) if results else False
+        has_errors = any(r[1] for r in results) if results else True
+        tier += 1
+
+    files_after = get_media_files_snapshot(SAVE_PATH)
+    new_files = diff_media_snapshots(files_before, files_after)
+    already_had_file = any(
+        ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower()) or ("already been downloaded" in l.lower())
         for l in shared_error_logs
     )
     disk_confirmed = bool(new_files) or already_had_file
@@ -967,19 +1487,90 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False):
         if has_cookie_issue(shared_error_logs):
             print_cookie_issue_hint()
 
-    return disk_confirmed, format_not_available, has_errors
+    return disk_confirmed, has_errors
 
-def start_download_process(url, file_type, ytdlp_bin):
+def start_multi_download_process(urls, file_type, ytdlp_bin, max_height=None):
+    cleaned = []
+    for u in urls:
+        u = clean_url(u)
+        if u and u not in cleaned:
+            cleaned.append(u)
+
+    spotify_urls = []
+    other_urls = []
+    for u in cleaned:
+        platform = get_platform(u)
+        if platform == "Spotify":
+            spotify_urls.append(u)
+        elif platform:
+            other_urls.append(u)
+        else:
+            print(tr("unsupported_platform"))
+
+    if not spotify_urls and not other_urls:
+        return
+
+    print(tr("multi_urls_summary", count=len(spotify_urls) + len(other_urls), fmt=file_type.upper()))
+    start_anim(tr("starting"))
+    _t0 = time.time()
+
+    success = True
+    has_errors = False
+
+    if other_urls:
+        ok, errs = download_urls_parallel(ytdlp_bin, other_urls, file_type, max_height=max_height)
+        success = success and ok
+        has_errors = has_errors or errs
+
+    for u in spotify_urls:
+        start_download_process(u, file_type, ytdlp_bin, max_height=max_height, show_header=False)
+
+    if other_urls:
+        _elapsed = int(time.time() - _t0)
+        _mins, _secs = divmod(_elapsed, 60)
+        _time_str = f"{_mins}м {_secs}с" if CURRENT_LANG == "ru" else f"{_mins}m {_secs}s"
+        print(tr("separator"))
+        if success:
+            if has_errors:
+                print(tr("partial_success"))
+            else:
+                print(tr("success"))
+            print(tr("saved_dir", path=SAVE_PATH))
+            print(tr("result_time", elapsed=_time_str))
+        else:
+            print(tr("aborted"))
+            if not os.path.exists(COOKIES_PATH):
+                print(tr("aborted_cookie_hint"))
+        print(tr("separator"))
+
+def start_download_process(url, file_type, ytdlp_bin, max_height=None, show_header=True):
     url = clean_url(url)
     platform = get_platform(url)
     if not platform:
         print(tr("unsupported_platform"))
         return
 
-    print(tr("source", platform=platform, fmt=file_type.upper()))
-    print(tr("starting"))
+    # show_header=False используется при пакетной загрузке нескольких ссылок
+    # одного типа (например несколько Spotify-треков подряд из
+    # start_multi_download_process) — источник и формат для всей пачки уже
+    # были показаны один раз строкой выше ("multi_urls_summary"), и печатать
+    # их заново перед каждым отдельным треком избыточно.
+    if show_header:
+        print(tr("source", platform=platform, fmt=file_type.upper()))
+    start_anim(tr("starting"))
+    _t0 = time.time()
 
     is_playlist = is_playlist_url(url)
+    # Warn if URL contains both a video ID and a playlist ID
+    try:
+        _parsed_url = urlparse(url)
+        _qs_url = parse_qs(_parsed_url.query)
+        if "list" in _qs_url and "v" in _qs_url:
+            stop_anim()
+            print(tr("playlist_v_ignored"))
+            start_anim(tr("starting"))
+    except Exception:
+        pass
     ffmpeg_exe = os.path.join(FFMPEG_DIR, "ffmpeg.exe") if FFMPEG_DIR else "ffmpeg"
 
     if platform == "Spotify":
@@ -1002,45 +1593,86 @@ def start_download_process(url, file_type, ytdlp_bin):
             cmd.extend(["--cookie-file", COOKIES_PATH])
 
         try:
-            success, _, has_errors = execute_and_stream_output(cmd, platform)
+            success, _, has_errors, _ = execute_and_stream_output(cmd, platform)
         except FileNotFoundError:
             print(tr("spotdl_not_found"))
             success = False
             has_errors = True
 
     else:
+        tier = 0
+        no_browser_cookies = False
+        success, format_not_available, has_errors, cookie_issue = False, False, True, False
+
         if is_playlist and PLAYLIST_WORKERS > 1:
-            success, format_not_available, has_errors = process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=False)
+            success, format_not_available, has_errors, cookie_issue = process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
         else:
-            cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, retry=False)
+            cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
             try:
-                success, format_not_available, has_errors = execute_and_stream_output(cmd, platform)
+                success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform)
             except FileNotFoundError:
                 print(tr("ytdlp_not_found"))
                 success = False
                 format_not_available = False
                 has_errors = True
 
-        if not success and format_not_available:
-            print(tr("fallback_start"))
+        # Если браузерные cookies не читаются (например, Chrome открыт и
+        # блокирует свою базу — "Could not copy Chrome cookie database"),
+        # смена "уровня клиента" YouTube ниже никак не помогает: проблема
+        # не в клиенте, а в самих cookies, и раньше скрипт просто сдавался
+        # на этом этапе, даже если контент публичный и авторизация вообще
+        # не нужна. Поэтому один раз пробуем повторить загрузку совсем
+        # без cookies, прежде чем переходить к перебору клиентов.
+        if not success and cookie_issue and not no_browser_cookies and not os.path.exists(COOKIES_PATH):
+            print(tr("cookie_retry_no_auth"))
+            no_browser_cookies = True
             if is_playlist and PLAYLIST_WORKERS > 1:
-                success, _, has_errors = process_playlist_parallel(ytdlp_bin, url, file_type, platform, retry=True)
+                success, format_not_available, has_errors, cookie_issue = process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
             else:
-                retry_cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, retry=True)
+                cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
                 try:
-                    success, _, has_errors = execute_and_stream_output(retry_cmd, platform)
+                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform)
+                except FileNotFoundError:
+                    print(tr("ytdlp_not_found"))
+                    success = False
+                    format_not_available = False
+                    has_errors = True
+
+        # Перебираем ВСЕ уровни клиентов (PLAYER_CLIENT_TIERS) по очереди,
+        # пока не получится либо не закончатся варианты. Раньше был всего
+        # один резервный набор клиентов — если и он не подходил для
+        # конкретного видео (возрастное ограничение, нестандартный набор
+        # форматов и т.п.), скрипт сдавался. Теперь в конце цепочки есть
+        # ещё "default" — встроенный в yt-dlp выбор клиента, который
+        # поддерживают и обновляют мейнтейнеры под текущие защиты YouTube.
+        tier += 1
+        while not success and format_not_available and tier < len(PLAYER_CLIENT_TIERS):
+            print(tr("fallback_start"))
+            clear_ytdlp_cache(ytdlp_bin)
+            if is_playlist and PLAYLIST_WORKERS > 1:
+                success, format_not_available, has_errors, cookie_issue = process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
+            else:
+                retry_cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
+                try:
+                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(retry_cmd, platform)
                 except FileNotFoundError:
                     print(tr("ytdlp_not_found"))
                     success = False
                     has_errors = True
+            tier += 1
+
+    _elapsed = int(time.time() - _t0)
+    _mins, _secs = divmod(_elapsed, 60)
+    _time_str = f"{_mins}м {_secs}с" if CURRENT_LANG == "ru" else f"{_mins}m {_secs}s"
 
     print(tr("separator"))
     if success:
-        if is_playlist and has_errors:
+        if platform != "Spotify" and is_playlist and has_errors:
             print(tr("partial_success"))
         else:
             print(tr("success"))
         print(tr("saved_dir", path=SAVE_PATH))
+        print(tr("result_time", elapsed=_time_str))
     else:
         print(tr("aborted"))
         if platform != "Spotify" and not os.path.exists(COOKIES_PATH):
@@ -1096,6 +1728,19 @@ def show_settings_menu():
             break
 
 def main():
+    # ── Log rotation: если лог > 1 МБ, архивируем ──
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 1024 * 1024:
+            bak = LOG_FILE + ".bak"
+            try:
+                if os.path.exists(bak):
+                    os.remove(bak)
+                os.rename(LOG_FILE, bak)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     ensure_save_directory()
 
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -1107,34 +1752,77 @@ def main():
 
     threading.Thread(target=ensure_aria2c_background, daemon=True).start()
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        pool.submit(update_tools, ytdlp_bin)
-        pool.submit(update_spotdl_dependencies_background)
+    # Обновление инструментов в фоне — не блокирует UI
+    threading.Thread(target=update_tools, args=(ytdlp_bin,), daemon=True).start()
+    threading.Thread(target=update_spotdl_dependencies_background, daemon=True).start()
+
+    _BOX_W = 50
+    _INNER = _BOX_W - 2
 
     while True:
         clear_screen()
-        print(tr("main_title"))
-        print(tr("separator"))
-        print(tr("main_save", path=SAVE_PATH))
-        
-        cookie_status = tr("cookie_active") if os.path.exists(COOKIES_PATH) else tr("cookie_browser")
-        cookie_color = GREEN if os.path.exists(COOKIES_PATH) else YELLOW
-        print(tr("main_cookie", color=cookie_color, status=cookie_status))
-        
-        ffmpeg_status = FFMPEG_DIR if FFMPEG_DIR else tr("ffmpeg_not_found_status")
-        ffmpeg_color = GREEN if FFMPEG_DIR else RED
-        print(tr("main_ffmpeg", color=ffmpeg_color, status=ffmpeg_status))
-        
-        print(tr("main_lang"))
-        print(tr("separator"))
 
-        url = input(tr("url_prompt")).strip()
-        if not url: break
+        # ── Заголовок-рамка ──
+        _subtitle = "Загрузчик медиа" if CURRENT_LANG == "ru" else "Media Downloader"
+        _title = f"  \u25c6 NovaDL  v1.2.0  \u2014  {_subtitle}"
+        _title_pad = max(0, _INNER - len(_title))
+        print(f"{CYAN}\u2554{'=' * _INNER}\u2557{CLR}")
+        print(f"{CYAN}\u2551{CLR}{BOLD}{CYAN}{_title}{' ' * _title_pad}{CYAN}\u2551{CLR}")
+        print(f"{CYAN}\u255a{'=' * _INNER}\u255d{CLR}")
+        print()
 
-        if url == '0':
+        # ── Статус ──
+        _cookie_ok = os.path.exists(COOKIES_PATH)
+        _cookie_icon = f"{GREEN}\u2713{CLR}" if _cookie_ok else f"{YELLOW}~{CLR}"
+        _cookie_label = tr("cookie_active") if _cookie_ok else tr("cookie_browser")
+
+        _ffmpeg_ok = bool(FFMPEG_DIR)
+        _ffmpeg_icon = f"{GREEN}\u2713{CLR}" if _ffmpeg_ok else f"{RED}\u2717{CLR}"
+        _ffmpeg_label = FFMPEG_DIR if FFMPEG_DIR else tr("ffmpeg_not_found_status")
+
+        _lang_label = f"{GREEN}Русский (RU){CLR}" if CURRENT_LANG == "ru" else f"{GREEN}English (EN){CLR}"
+
+        if CURRENT_LANG == "ru":
+            _key_save, _key_cookie, _key_ffmpeg, _key_lang = "Сохранение", "Куки", "FFmpeg", "Язык"
+        else:
+            _key_save, _key_cookie, _key_ffmpeg, _key_lang = "Save path", "Cookies", "FFmpeg", "Language"
+
+        _bullet = "\u25b8"
+        print(f"  {WHITE}{_bullet} {_key_save:<12}{CLR} {YELLOW}{SAVE_PATH}{CLR}")
+        print(f"  {WHITE}{_bullet} {_key_cookie:<12}{CLR} {_cookie_icon} {_cookie_label}")
+        print(f"  {WHITE}{_bullet} {_key_ffmpeg:<12}{CLR} {_ffmpeg_icon} {_ffmpeg_label}")
+        print(f"  {WHITE}{_bullet} {_key_lang:<12}{CLR} {_lang_label}")
+        print()
+        _hline = "\u2500" * _BOX_W
+        print(f"{CYAN}{_hline}{CLR}")
+
+        url_input = input(tr("url_prompt")).strip()
+        if not url_input:
+            break
+
+        if url_input == '0':
             show_settings_menu()
             continue
 
+        urls = url_input.split()
+
+        # ── Определяем платформу и режим для отображения ──
+        _first_clean = clean_url(urls[0])
+        _platform_str = get_platform(_first_clean) or ("Неизвестно" if CURRENT_LANG == "ru" else "Unknown")
+        if len(urls) > 1:
+            _mode_str = tr("mode_multi")
+        elif is_playlist_url(_first_clean):
+            _mode_str = tr("mode_playlist")
+        else:
+            _mode_str = tr("mode_single")
+
+        print()
+        _plabel = tr("platform_label")
+        _mlabel = tr("mode_label")
+        _pipe = "\u2502"
+        _hline2 = "\u2500" * _BOX_W
+        print(f"  {WHITE}{_plabel}:{CLR} {CYAN}{_platform_str}{CLR}  {_pipe}  {WHITE}{_mlabel}:{CLR} {CYAN}{_mode_str}{CLR}")
+        print(f"{CYAN}{_hline2}{CLR}")
         print(tr("choose_format"))
         print(tr("fmt_mp3"))
         print(tr("fmt_wav"))
@@ -1147,8 +1835,22 @@ def main():
         if choice == '2': file_type = "wav"
         elif choice == '3': file_type = "mp4"
 
+        # После выбора MP4 (пункт "3") запрашиваем у пользователя качество.
+        # Верхний вариант меню всегда равен РЕАЛЬНОМУ максимальному
+        # качеству именно этого видео (см. choose_video_quality /
+        # probe_max_video_height) — раньше же качество было жёстко
+        # ограничено 1080p независимо от того, что доступно на самом деле.
+        # Для Spotify-ссылок качество видео не имеет смысла (spotdl всегда
+        # отдаёт аудио), поэтому меню для них не показываем.
+        max_height = None
+        if choice == '3' and get_platform(urls[0]) != "Spotify":
+            max_height = choose_video_quality(ytdlp_bin, urls[0])
+
         try:
-            start_download_process(url, file_type, ytdlp_bin)
+            if len(urls) > 1:
+                start_multi_download_process(urls, file_type, ytdlp_bin, max_height=max_height)
+            else:
+                start_download_process(urls[0], file_type, ytdlp_bin, max_height=max_height)
         except KeyboardInterrupt:
             raise
         except Exception as e:
