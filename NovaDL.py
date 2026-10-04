@@ -15,6 +15,8 @@ import threading
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 import collections
+import queue
+import atexit
 
 if os.name == 'nt':
     import msvcrt
@@ -176,6 +178,19 @@ TRANSLATIONS = {
         "mode_multi": "Несколько ссылок",
         "platform_label": "Платформа",
         "mode_label": "Режим",
+        "thread_label": "Поток {id}",
+        "multi_overall": "{WHITE}Всего:{CLR} {GREEN}{done}{CLR}{WHITE}/{total}{CLR}",
+        "multi_failed": "{RED}Ошибок: {n}{CLR}",
+        "stage_processing": "Обработка…",
+        "stage_merging": "Склейка…",
+        "stage_audio": "Аудио…",
+        "stage_cover": "Обложка…",
+        "stage_meta": "Метаданные…",
+        "stage_done": "Готово",
+        "stage_failed": "Ошибка",
+        "stage_idle": "Свободен",
+        "stage_exists": "Уже скачано",
+        "merge_streams": "\n{YELLOW}[*] Склейка видео и аудио...{CLR}",
     },
     "en": {
         "curr_dir": "\n{WHITE}Current directory:{CLR} {YELLOW}{save_path}{CLR}",
@@ -279,6 +294,19 @@ TRANSLATIONS = {
         "mode_multi": "Multiple URLs",
         "platform_label": "Platform",
         "mode_label": "Mode",
+        "thread_label": "Thread {id}",
+        "multi_overall": "{WHITE}Total:{CLR} {GREEN}{done}{CLR}{WHITE}/{total}{CLR}",
+        "multi_failed": "{RED}Failed: {n}{CLR}",
+        "stage_processing": "Processing…",
+        "stage_merging": "Merging…",
+        "stage_audio": "Audio…",
+        "stage_cover": "Cover art…",
+        "stage_meta": "Metadata…",
+        "stage_done": "Done",
+        "stage_failed": "Failed",
+        "stage_idle": "Idle",
+        "stage_exists": "Already saved",
+        "merge_streams": "\n{YELLOW}[*] Merging video and audio...{CLR}",
     }
 }
 
@@ -396,6 +424,7 @@ class LoadingAnimation:
 
     def __init__(self, text, style="braille"):
         self.text = text.replace('\n', '').rstrip()
+        self.style = style
         self.chars = self.BRAILLE if style == "braille" else self.DOTS
         self.running = False
         self.thread = None
@@ -663,11 +692,27 @@ HTTP_CHUNK_SIZE = os.environ.get("NOVADL_HTTP_CHUNK_SIZE", "16M")
 PLAYLIST_WORKERS = max(1, int(os.environ.get("NOVADL_PLAYLIST_WORKERS", "2")))
 ARIA2_CONNECTIONS = os.environ.get("NOVADL_ARIA2_CONNECTIONS", "8")
 
+# aria2c теперь ОПЦИОНАЛЕН (NOVADL_USE_ARIA2C=1). С "-x 1 -s 1" он не даёт никакого
+# параллелизма, зато качает файл ОДНИМ непрерывным запросом: родной загрузчик
+# yt-dlp режет YouTube-потоки на чанки (--http-chunk-size), чтобы обойти
+# троттлинг googlevideo, а внешний aria2c этого не делает — отсюда "быстро до
+# ~90%, а дальше ползёт". Плюс его строки прогресса имеют другой формат.
+USE_ARIA2C = os.environ.get("NOVADL_USE_ARIA2C", "0").strip().lower() in ("1", "true", "yes", "on")
+
+# Защита от "зависаний на последних процентах":
+#  * socket-timeout — по умолчанию у yt-dlp 20 с, умноженное на 10 ретраев даёт
+#    минуты ожидания на одном зависшем чанке/фрагменте;
+#  * throttled-rate — если скорость падает ниже порога (YouTube душит соединение),
+#    yt-dlp заново запрашивает ссылку вместо того, чтобы ползти на 50 КБ/с.
+#    Чтобы отключить, задайте NOVADL_THROTTLED_RATE=0.
+SOCKET_TIMEOUT = os.environ.get("NOVADL_SOCKET_TIMEOUT", "15")
+THROTTLED_RATE = os.environ.get("NOVADL_THROTTLED_RATE", "100K")
+
 _ARIA2C_PATH = shutil.which("aria2c")
 
 def ensure_aria2c_background():
     global _ARIA2C_PATH
-    if os.name != 'nt' or _ARIA2C_PATH or not shutil.which("winget"):
+    if not USE_ARIA2C or os.name != 'nt' or _ARIA2C_PATH or not shutil.which("winget"):
         return
     try:
         subprocess.run(
@@ -680,7 +725,7 @@ def ensure_aria2c_background():
         pass
 
 def get_speed_args():
-    if _ARIA2C_PATH:
+    if USE_ARIA2C and _ARIA2C_PATH:
         # ВАЖНО: googlevideo.com не допускает несколько параллельных
         # Range-соединений к одному и тому же подписанному URL — все,
         # кроме первого, получают HTTP 403 (aria2c падает с errorCode=22).
@@ -728,9 +773,17 @@ def get_cookies_args(allow_browser_fallback=True):
         return []
 
     if not _cookie_warning_shown:
+        # Если в этот момент крутится спиннер, его "\r"-строка перемешалась бы с
+        # текстом предупреждения (получалась каша из двух строк). Гасим спиннер
+        # на время вывода и запускаем заново с тем же текстом/стилем.
+        _anim = _global_anim
+        _resume = (_anim.text, _anim.style) if _anim else None
+        stop_anim()
         print(tr("cookie_not_found", path=COOKIES_PATH))
         print(tr("cookie_chrome_warn"))
         _cookie_warning_shown = True
+        if _resume:
+            start_anim(_resume[0], style=_resume[1])
 
     return ["--cookies-from-browser", "chrome"]
 
@@ -884,6 +937,332 @@ def render_progress_bar(percentage, status_text, speed_text="", width=30, speed_
     )
     sys.stdout.flush()
 
+# ──────────────────────────────────────────────────────────────────────────
+# РАЗБОР ВЫВОДА yt-dlp И ПРОГРЕСС ТРЕКОВ
+# ──────────────────────────────────────────────────────────────────────────
+_RE_PERCENT = re.compile(r'(\d+(?:\.\d+)?)%')
+_RE_YT_SPEED = re.compile(r'at\s+([\d.]+\S+/s)')
+_RE_ARIA = re.compile(r'\[#\w+\s+[\d.]+\w*/[\d.]+\w*\((\d+)%\)(?:.*?DL:([\d.]+\w*))?')
+_RE_ITEM = re.compile(r'Downloading item (\d+) of (\d+)')
+_RE_FORMATS = re.compile(r'Downloading\s+\d+\s+format\(s\):\s*(\S+)')
+
+def parse_progress_line(line):
+    """Возвращает (процент, скорость_текстом) для строки прогресса загрузки или None.
+
+    Понимает и родной вывод yt-dlp ("[download]  45.3% of ~10MiB at 2MiB/s ETA 00:05"),
+    и вывод aria2c ("[#a1b2c3 5MiB/20MiB(25%) CN:1 DL:3MiB ETA:4s]"). Раньше
+    учитывался только первый вариант и только с десятичной точкой в проценте.
+    """
+    if "[download]" in line and "%" in line and ("ETA" in line or " of " in line):
+        m = _RE_PERCENT.search(line)
+        if m:
+            sm = _RE_YT_SPEED.search(line)
+            return float(m.group(1)), (sm.group(1) if sm else "")
+    elif line.startswith("[#"):
+        m = _RE_ARIA.search(line)
+        if m:
+            speed = (m.group(2) + "/s") if m.group(2) else ""
+            return float(m.group(1)), speed
+    return None
+
+def classify_post_stage(line):
+    """Ключ перевода стадии постобработки (склейка, обложка, теги...) или None."""
+    low = line.lower()
+    if "[Merger]" in line:
+        return "stage_merging"
+    if "[ExtractAudio]" in line:
+        return "stage_audio"
+    if "[ThumbnailsConvertor]" in line or "[EmbedThumbnail]" in line or "embed-thumbnail" in low:
+        return "stage_cover"
+    if "[Metadata]" in line or "embed-metadata" in low:
+        return "stage_meta"
+    if any(tag in line for tag in ("[MoveFiles]", "[Fixup", "[VideoConvertor]", "[VideoRemuxer]")):
+        return "stage_processing"
+    return None
+
+def expected_stream_count(file_type, tier=0, max_height=None):
+    """Сколько потоков (видео+аудио) yt-dlp скачает для одного трека, если не сказано точнее."""
+    if file_type != "mp4":
+        return 1
+    if tier > 0 and not max_height:
+        return 1    # резервный формат "best" — один совмещённый поток
+    return 2
+
+class TrackProgress:
+    """Монотонный общий прогресс ОДНОГО трека.
+
+    Что исправляет:
+      * проценты yt-dlp "гуляют" (для фрагментных загрузок оценка размера
+        уточняется на ходу: 63.4% -> 62.9% -> 64.1%) — откаты внутри потока
+        игнорируются, бар идёт только вперёд;
+      * у видео и аудио счёт идёт заново с 0% — раньше бар на середине
+        прыгал обратно в ноль. Теперь потоки сводятся в один бар с весами
+        (видео ≈ 88%, аудио ≈ 12%), число потоков берётся из строки
+        "Downloading 2 format(s): 137+140".
+    """
+    VIDEO_WEIGHT = 0.88
+
+    def __init__(self, expected_streams=1):
+        self.expected = max(1, int(expected_streams))
+        self.idx = 0
+        self.stream_pct = 0.0
+        self.overall = 0.0
+        self.speed_text = ""
+        self.started = False
+
+    def _weights(self):
+        if self.expected == 1:
+            return [1.0]
+        rest = (1.0 - self.VIDEO_WEIGHT) / (self.expected - 1)
+        return [self.VIDEO_WEIGHT] + [rest] * (self.expected - 1)
+
+    def set_expected(self, n):
+        if not self.started:
+            self.expected = max(1, int(n))
+
+    def new_stream(self):
+        """Вызывается на "[download] Destination:" — начался следующий поток трека."""
+        if self.started and self.stream_pct > 0:
+            self.idx += 1
+            self.stream_pct = 0.0
+
+    def update(self, pct, speed_text=""):
+        pct = max(0.0, min(100.0, pct))
+        # Страховка, если строку Destination пропустили: прошлый поток уже ~100%,
+        # а новый стартует с малого значения — это следующий поток, а не откат.
+        if self.started and self.stream_pct >= 99.0 and pct < 20.0 and self.idx + 1 < self.expected:
+            self.idx += 1
+            self.stream_pct = 0.0
+        self.started = True
+        if pct > self.stream_pct:
+            self.stream_pct = pct
+        if speed_text:
+            self.speed_text = speed_text
+        w = self._weights()
+        i = min(self.idx, len(w) - 1)
+        value = (sum(w[:i]) + w[i] * self.stream_pct / 100.0) * 100.0
+        if value > self.overall:
+            self.overall = value
+        return self.overall
+
+    def finish(self):
+        """Загрузка закончена (пошла постобработка / файл уже был) — бар на 100%."""
+        self.started = True
+        self.overall = 100.0
+        return self.overall
+
+class MultiProgress:
+    """Живой блок прогресса для параллельной загрузки.
+
+    По ОДНОЙ строке на каждый активный поток + итоговая строка. Блок
+    перерисовывается на месте (курсор вверх + очистка строки) одним write()
+    ~12 раз в секунду, поэтому:
+      * вместо 10–15 новых строк на трек — один бар, который обновляется;
+      * отображаемое значение плавно "догоняет" реальное и никогда не
+        откатывается назад;
+      * во время склейки/обложки/тегов в строке виден этап, а не "зависший" бар.
+    Если stdout не терминал (перенаправлен в файл) — живая отрисовка отключается,
+    печатается по одной строке на завершённый трек.
+    """
+    FPS = 12
+    _cursor_guard_registered = False
+
+    def __init__(self, slot_count, total_tracks=0, show_overall=True):
+        self._lock = threading.RLock()
+        self._slots = [self._new_slot(i) for i in range(max(1, slot_count))]
+        self.total = total_tracks
+        self.show_overall = show_overall
+        self._status = {}
+        self._frame = 0
+        self._drawn_lines = 0
+        self._stop_evt = threading.Event()
+        self._thread = None
+        self._started = False
+        try:
+            self._tty = sys.stdout.isatty()
+        except Exception:
+            self._tty = False
+
+    @staticmethod
+    def _new_slot(i):
+        return {"label": tr("thread_label", id=i + 1), "target": 0.0, "shown": 0.0,
+                "speed": "", "state": "idle", "stage": ""}
+
+    # ── управление ──
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        if self._tty:
+            if not MultiProgress._cursor_guard_registered:
+                atexit.register(lambda: (sys.stdout.write("\033[?25h"), sys.stdout.flush()))
+                MultiProgress._cursor_guard_registered = True
+            sys.stdout.write("\033[?25l")
+            sys.stdout.flush()
+            self._stop_evt.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        if not self._started:
+            return
+        self._started = False
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
+        if self._tty:
+            self._draw(final=True)
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+
+    # ── обновление состояния (потокобезопасно) ──
+    def begin_track(self, slot, label):
+        with self._lock:
+            s = self._slots[slot]
+            s.update(label=label, target=0.0, shown=0.0, speed="", state="active", stage="")
+
+    def set_label(self, slot, label):
+        with self._lock:
+            self._slots[slot]["label"] = label
+
+    def update(self, slot, pct, speed=""):
+        with self._lock:
+            s = self._slots[slot]
+            if s["state"] in ("idle", "ok", "fail"):
+                s["state"] = "active"
+            if pct > s["target"]:
+                s["target"] = min(100.0, pct)
+            if speed:
+                s["speed"] = speed
+            if s["state"] == "active":
+                s["stage"] = ""
+
+    def set_stage(self, slot, stage_text):
+        with self._lock:
+            s = self._slots[slot]
+            s["state"] = "processing"
+            s["stage"] = stage_text
+            s["target"] = 100.0
+
+    def finish_track(self, slot, track_key, ok):
+        with self._lock:
+            s = self._slots[slot]
+            s["state"] = "ok" if ok else "fail"
+            s["stage"] = tr("stage_done") if ok else tr("stage_failed")
+            s["speed"] = ""
+            if ok:
+                s["target"] = 100.0
+            self._status[track_key] = bool(ok)
+        if not self._tty:
+            with self._lock:
+                print(f"[{s['label']}] {tr('stage_done') if ok else tr('stage_failed')}", flush=True)
+
+    def set_idle(self, slot):
+        with self._lock:
+            s = self._slots[slot]
+            if s["state"] not in ("ok", "fail"):
+                s["state"] = "idle"
+                s["stage"] = tr("stage_idle")
+                s["speed"] = ""
+
+    def add_total(self, n):
+        with self._lock:
+            if self.total > 0:
+                self.total += n
+
+    # ── отрисовка ──
+    def _loop(self):
+        while not self._stop_evt.wait(1.0 / self.FPS):
+            self._frame += 1
+            try:
+                self._draw()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _layout(cols):
+        label_w, tail_w = 22, 16
+        bar_w = cols - 1 - 13 - label_w - tail_w
+        if bar_w < 8:
+            tail_w = 10
+            bar_w = cols - 1 - 13 - label_w - tail_w
+        if bar_w < 8:
+            label_w = max(6, cols - 1 - 13 - tail_w - 8)
+            bar_w = max(4, cols - 1 - 13 - label_w - tail_w)
+        return label_w, min(bar_w, 26), tail_w
+
+    def _slot_line(self, s, label_w, bar_w, tail_w):
+        pct = max(0.0, min(100.0, s["shown"]))
+        state = s["state"]
+        if state == "ok":
+            icon, bar_color = f"{GREEN}✓{CLR}", GREEN
+        elif state == "fail":
+            icon, bar_color = f"{RED}✗{CLR}", RED
+        elif state == "idle":
+            icon, bar_color = f"{WHITE}·{CLR}", WHITE
+        else:
+            icon = f"{CYAN}{LoadingAnimation.BRAILLE[self._frame % len(LoadingAnimation.BRAILLE)]}{CLR}"
+            bar_color = YELLOW if pct < 34 else (CYAN if pct < 75 else GREEN)
+
+        filled_float = bar_w * pct / 100.0
+        filled = int(filled_float)
+        part_idx = int(round((filled_float - filled) * (len(_PARTIAL_BLOCKS) - 1)))
+        bar = '█' * filled
+        if filled < bar_w and part_idx > 0:
+            bar += _PARTIAL_BLOCKS[part_idx]
+            filled += 1
+        bar += '░' * (bar_w - filled)
+
+        if state == "active":
+            tail = f"⇩ {s['speed']}" if s["speed"] else ""
+        else:
+            tail = s["stage"]
+        label = s["label"][:label_w].ljust(label_w)
+        tail = tail[:tail_w].ljust(tail_w)
+        return (f"{icon} {CYAN}{label}{CLR} {WHITE}│{CLR}{bar_color}{bar}{CLR}{WHITE}│{CLR} "
+                f"{BOLD}{pct:>5.1f}%{CLR} {WHITE}{tail}{CLR}")
+
+    def _build_lines(self, final=False):
+        try:
+            size = shutil.get_terminal_size((100, 30))
+            cols, rows = size.columns, size.lines
+        except Exception:
+            cols, rows = 100, 30
+        label_w, bar_w, tail_w = self._layout(cols)
+        max_visible = max(1, rows - 4)
+        lines = []
+        with self._lock:
+            for s in self._slots[:max_visible]:
+                if final:
+                    s["shown"] = s["target"]
+                else:
+                    diff = s["target"] - s["shown"]
+                    if diff > 0:
+                        s["shown"] = min(s["target"], s["shown"] + max(diff * 0.35, 0.2))
+                lines.append(self._slot_line(s, label_w, bar_w, tail_w))
+            if self.show_overall:
+                done = sum(1 for v in self._status.values() if v)
+                failed = sum(1 for v in self._status.values() if not v)
+                total = str(self.total) if self.total > 0 else "?"
+                text = "  " + tr("multi_overall", done=done, total=total)
+                if failed:
+                    text += "  " + tr("multi_failed", n=failed)
+                lines.append(text)
+        return lines
+
+    def _draw(self, final=False):
+        lines = self._build_lines(final=final)
+        buf = []
+        if self._drawn_lines:
+            buf.append(f"\033[{self._drawn_lines}A")
+        for ln in lines:
+            buf.append(f"\r\033[K{ln}\n")
+        buf.append("\033[J")
+        sys.stdout.write("".join(buf))
+        sys.stdout.flush()
+        self._drawn_lines = len(lines)
+
 AUDIO_VIDEO_EXTENSIONS = (".mp3", ".wav", ".mp4", ".m4a", ".flac", ".webm", ".ogg", ".opus", ".mkv", ".weba")
 INCOMPLETE_EXTENSIONS = (".part", ".ytdl", ".temp", ".ffmpeg", ".crdownload")
 
@@ -919,7 +1298,7 @@ def diff_media_snapshots(before, after):
             changed.add(name)
     return changed
 
-def execute_and_stream_output(cmd, platform):
+def execute_and_stream_output(cmd, platform, expected_streams=1):
     files_before = get_media_files_snapshot(SAVE_PATH)
 
     try:
@@ -950,10 +1329,24 @@ def execute_and_stream_output(cmd, platform):
     anim_text = tr("starting")
     anim_on = True
 
+    bar_open = False    # True, пока курсор стоит в конце незавершённой строки с баром
+
     def announce(text):
-        nonlocal anim_on, anim_text
+        # ВАЖНО: раньше здесь был print(text), а затем start_anim(text) с ТЕМ ЖЕ
+        # текстом — каждый этап ("Склейка...", "Сохранение метаданных...")
+        # выводился дважды подряд. Теперь текст рисует только спиннер (он же
+        # печатает итоговую строку при остановке); здесь лишь сохраняем отступы:
+        # ведущие "\n" из перевода и перенос строки после недорисованного бара.
+        nonlocal anim_on, anim_text, bar_open
         stop_anim()
-        print(text)
+        lead = len(text) - len(text.lstrip("\n"))
+        if bar_open:
+            sys.stdout.write("\n")
+            bar_open = False
+            lead -= 1
+        if lead > 0:
+            sys.stdout.write("\n" * lead)
+        sys.stdout.flush()
         anim_text = text
         start_anim(anim_text)
         anim_on = True
@@ -966,64 +1359,135 @@ def execute_and_stream_output(cmd, platform):
 
     current_track_num = 0
     has_errors = False
+    # ВАЖНО: в журнал ошибок больше НЕ попадают строки прогресса. Раньше при
+    # сотнях строк "[download] xx%" в секунду реальные сообщения об ошибках
+    # (и "Requested format is not available") вытеснялись из 15-строчного
+    # буфера, и повторная попытка с другим клиентом не запускалась.
     error_logs = collections.deque(maxlen=15)
+    retryable_seen = False
+    already_seen = False
+    cookie_seen = False
+
+    tracker = TrackProgress(expected_streams)
+    last_draw_t = 0.0
+    last_drawn_pct = -1.0
+
+    def draw_progress(pct, speed_text, label_num):
+        # Не чаще ~10 раз/с и только если значение реально изменилось —
+        # меньше мерцания и системных вызовов записи в консоль.
+        nonlocal last_draw_t, last_drawn_pct
+        now = time.monotonic()
+        if pct == last_drawn_pct:
+            return
+        if pct < 100.0 and now - last_draw_t < 0.1:
+            return
+        nonlocal bar_open
+        last_draw_t = now
+        last_drawn_pct = pct
+        render_progress_bar(pct, tr("downloading_num", num=label_num if label_num else 1), speed_text)
+        bar_open = True
 
     while True:
         line = process.stdout.readline()
-        if not line and process.poll() is not None:
-            break
+        if not line:
+            break    # EOF: процесс закрыл вывод (раньше здесь был холостой цикл с нагрузкой на CPU)
 
         line_str = line.strip()
-        if line_str:
-            error_logs.append(line_str)
+        if not line_str:
+            continue
 
+        prog = parse_progress_line(line_str) if platform in ("YouTube", "SoundCloud") else None
+        if prog is None:
+            error_logs.append(line_str)
             if "ERROR:" in line_str or "Failed" in line_str:
                 has_errors = True
+            if is_retryable_ytdlp_error(line_str):
+                retryable_seen = True
+            low_line = line_str.lower()
+            if ("already exists" in low_line or "skipping" in low_line
+                    or "already downloaded" in low_line or "already been downloaded" in low_line):
+                already_seen = True
+            if not cookie_seen and has_cookie_issue([line_str]):
+                cookie_seen = True
 
         if "[download]" in line_str and "Downloading item" in line_str:
-            match_item = re.search(r'Downloading item (\d+) of (\d+)', line_str)
+            match_item = _RE_ITEM.search(line_str)
             if match_item:
                 current_track_num = match_item.group(1)
                 total_tracks = match_item.group(2)
+                # Новый трек плейлиста — новый независимый прогресс.
+                tracker = TrackProgress(expected_streams)
+                last_drawn_pct = -1.0
                 announce(tr("playlist_track", curr=current_track_num, total=total_tracks))
 
         if platform in ["YouTube", "SoundCloud"]:
-            if "[download]" in line_str and "%" in line_str and "ETA" in line_str:
-                match = re.search(r'(\d+\.\d+)%', line_str)
-                if match:
-                    pause_anim_for_progress()
-                    pct = float(match.group(1))
-                    speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
-                    speed_text = speed_match.group(1) if speed_match else ""
-                    render_progress_bar(pct, tr("downloading_num", num=current_track_num if current_track_num else 1), speed_text)
-            elif "[ExtractAudio]" in line_str:
-                announce(tr("extract_audio"))
-            elif "[ThumbnailsConvertor]" in line_str or "embed-thumbnail" in line_str.lower():
-                announce(tr("process_cover"))
-            elif "[Metadata]" in line_str or "embed-metadata" in line_str.lower():
-                announce(tr("save_meta"))
+            if "format(s):" in line_str:
+                fm = _RE_FORMATS.search(line_str)
+                if fm:
+                    tracker.set_expected(len(fm.group(1).split("+")))
+            elif "[download] Destination:" in line_str:
+                tracker.new_stream()
+
+            if prog is not None:
+                pause_anim_for_progress()
+                pct = tracker.update(prog[0], prog[1])
+                draw_progress(pct, tracker.speed_text, current_track_num)
+            elif "already been downloaded" in line_str:
+                tracker.finish()
+            else:
+                stage = classify_post_stage(line_str)
+                if stage:
+                    # Скачивание закончено — доводим бар до 100% и объявляем этап.
+                    # Именно этот промежуток (склейка видео+аудио, вшивание обложки
+                    # и тегов — каждый раз полная перепаковка файла ffmpeg) раньше
+                    # выглядел как "бар завис на последних процентах".
+                    if tracker.started:
+                        pause_anim_for_progress()
+                        draw_progress(tracker.finish(), tracker.speed_text, current_track_num)
+                    else:
+                        tracker.finish()
+                    if stage == "stage_merging":
+                        announce(tr("merge_streams"))
+                    elif stage == "stage_audio":
+                        announce(tr("extract_audio"))
+                    elif stage == "stage_cover":
+                        announce(tr("process_cover"))
+                    elif stage == "stage_meta":
+                        announce(tr("save_meta"))
 
         elif platform == "Spotify":
             if "Fetching" in line_str or "Searching" in line_str or "Found" in line_str:
                 if anim_text != tr("fetching_db"):
                     announce(tr("fetching_db"))
             elif "Downloading" in line_str or "Downloaded" in line_str:
-                pause_anim_for_progress()
                 match = re.search(r'(\d+)%', line_str)
-                pct = float(match.group(1)) if match else 100.0
-                speed_match = re.search(r'([\d.]+\s?[KMG]?i?B/s)', line_str, re.IGNORECASE)
-                speed_text = speed_match.group(1) if speed_match else ""
-                render_progress_bar(pct, tr("download_audio"), speed_text)
+                # ВАЖНО: раньше при отсутствии "%" в строке бар рисовался на 100%
+                # (по умолчанию), и тут же откатывался на реальные 40–60% в
+                # следующей строке — отсюда "дёргания" на Spotify. Теперь строка
+                # без процента бар не трогает, а полные 100% рисуются только для
+                # "Downloaded".
+                if match or "Downloaded" in line_str:
+                    pause_anim_for_progress()
+                    pct = float(match.group(1)) if match else 100.0
+                    speed_match = re.search(r'([\d.]+\s?[KMG]?i?B/s)', line_str, re.IGNORECASE)
+                    speed_text = speed_match.group(1) if speed_match else ""
+                    render_progress_bar(pct, tr("download_audio"), speed_text)
             elif "Converting" in line_str or "Processing" in line_str:
                 announce(tr("applying_tags"))
 
     stop_anim()
-    process.wait()
+    returncode = process.wait()
 
-    format_not_available = any(is_retryable_ytdlp_error(l) for l in error_logs)
+    # Процесс завершился успешно, а бар так и не дошёл до 100% (один поток без
+    # этапов постобработки в выводе) — дорисовываем.
+    if platform in ("YouTube", "SoundCloud") and tracker.started and last_drawn_pct < 100.0 and returncode == 0:
+        render_progress_bar(tracker.finish(), tr("downloading_num", num=current_track_num if current_track_num else 1), tracker.speed_text)
+        bar_open = True
+
+    format_not_available = retryable_seen or any(is_retryable_ytdlp_error(l) for l in error_logs)
     files_after = get_media_files_snapshot(SAVE_PATH)
     new_files = diff_media_snapshots(files_before, files_after)
-    already_had_file = any(
+    already_had_file = already_seen or any(
         ("already exists" in l.lower()) or ("skipping" in l.lower()) or ("already downloaded" in l.lower()) or ("already been downloaded" in l.lower())
         for l in error_logs
     )
@@ -1032,7 +1496,7 @@ def execute_and_stream_output(cmd, platform):
     for l in error_logs:
         log_line(l)
 
-    cookie_issue = has_cookie_issue(error_logs)
+    cookie_issue = cookie_seen or has_cookie_issue(error_logs)
     fs_permission_issue = has_fs_permission_issue(error_logs)
 
     if not disk_confirmed:
@@ -1097,8 +1561,20 @@ def build_common_ytdlp_args(tier=0, no_browser_cookies=False):
         "--force-overwrites",
         "--retries", "10",
         "--fragment-retries", "10",
-        "--retry-sleep", "3",
+        # Короткие паузы между повторами: обычные HTTP-ретраи — 2 с, для
+        # фрагментов — экспоненциально 1..8 с (раньше везде стояло фиксированное
+        # "3", и вместе с 20-секундным socket-timeout одно зависание стоило минуты).
+        "--retry-sleep", "2",
+        "--retry-sleep", "fragment:exp=1:8",
+        "--socket-timeout", SOCKET_TIMEOUT,
+        # Каждое обновление прогресса — отдельная строка (а не "\r"-перезапись) и
+        # не чаще 4 раз в секунду: при 16 параллельных фрагментах yt-dlp иначе
+        # шлёт сотни строк/с, которые мы зря разбираем регулярками.
+        "--newline",
+        "--progress-delta", "0.25",
     ]
+    if THROTTLED_RATE and THROTTLED_RATE != "0":
+        args.extend(["--throttled-rate", THROTTLED_RATE])
     # ВАЖНО: раньше здесь стоял "--no-warnings", который скрывал причину
     # неудачи конкретного клиента (например "Sign in to confirm your age",
     # "requires purchase", предупреждения о PO Token и т.п.) — в логе
@@ -1276,7 +1752,34 @@ def extract_playlist_video_urls(ytdlp_bin, url):
         log_line(f"Не удалось получить список плейлиста одним запросом: {e}")
         return []
 
-def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
+def _worker_label(worker_id, track_no=None, item=None):
+    label = tr("thread_label", id=worker_id)
+    if track_no is not None:
+        label += f" · #{track_no}"
+    if item:
+        label += f" ({item[0]}/{item[1]})"
+    return label
+
+def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs,
+                            mp=None, slot=None, track_no=None, expected_streams=1):
+    """Запускает один процесс yt-dlp и ведёт ОДИН бар в строке `slot` общего блока `mp`.
+
+    Возвращает (format_not_available, has_error, cookie_issue) — как и раньше.
+    """
+    slot = (worker_id - 1) if slot is None else slot
+    base_track_no = track_no
+    # Ключ статуса трека в общем счётчике. В резервном режиме (без списка
+    # ссылок) номера элементов у воркеров пересекаются, поэтому ключ — по воркеру.
+    key_base = base_track_no if base_track_no is not None else ("w", worker_id)
+    # Если процесс обрабатывает плейлист ("Downloading item N of M"), каждый
+    # элемент — отдельный трек со своим ключом статуса и своим бар-состоянием.
+    item_mode = False
+    item_failed = False
+    cur_item = None
+
+    def _label(item=None):
+        return _worker_label(worker_id, base_track_no, item)
+
     try:
         try:
             process = subprocess.Popen(
@@ -1286,63 +1789,97 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
         except Exception as e:
             with print_lock:
                 shared_error_logs.append(tr("thread_start_err", id=worker_id, e=e))
-            return False, True
+            if mp:
+                mp.begin_track(slot, _label())
+                mp.finish_track(slot, key_base, False)
+            return False, True, False
 
-        last_bucket = -1
+        if mp:
+            mp.begin_track(slot, _label())
+
+        tracker = TrackProgress(expected_streams)
         local_logs = collections.deque(maxlen=15)
         format_not_available = False
         has_error = False
+        cookie_issue = False
 
         while True:
             line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
+            if not line:
+                break    # EOF — без холостого цикла, пока процесс дозавершается
             line_str = line.strip()
             if not line_str:
                 continue
 
-            local_logs.append(line_str)
+            prog = parse_progress_line(line_str)
 
-            if is_retryable_ytdlp_error(line_str):
-                format_not_available = True
+            # Строки прогресса в журнал не пишем (иначе они вытесняют реальные ошибки).
+            if prog is None:
+                local_logs.append(line_str)
 
-            if "ERROR:" in line_str or "Failed" in line_str:
-                has_error = True
+                if is_retryable_ytdlp_error(line_str):
+                    format_not_available = True
 
-            if "[download]" in line_str and "%" in line_str and "ETA" in line_str:
-                match = re.search(r'(\d+\.\d+)%', line_str)
-                if match:
-                    pct = float(match.group(1))
-                    # Обновляем строку каждые 5% (а не 10%), чтобы анимация
-                    # выглядела более плавной, но не заваливала консоль
-                    # десятками строк в секунду при частых апдейтах от yt-dlp.
-                    bucket = int(pct // 5) * 5
-                    if bucket != last_bucket:
-                        last_bucket = bucket
-                        speed_match = re.search(r'at\s+([\d.]+\S+/s)', line_str)
-                        speed_text = speed_match.group(1) if speed_match else ""
-                        speed_display = f"⇩ {speed_text}" if speed_text else ""
-                        bar_w = 20
-                        if pct < 34:
-                            bar_color = YELLOW
-                        elif pct < 75:
-                            bar_color = CYAN
-                        else:
-                            bar_color = GREEN
-                        filled = int(bar_w * pct / 100)
-                        bar_str = '█' * filled + '░' * (bar_w - filled)
-                        _thr_label = TRANSLATIONS.get(CURRENT_LANG, TRANSLATIONS["ru"]).get(
-                            "thread_progress", "[Поток {id}]").split("{pct")[0].format(
-                            id=worker_id, CLR="", CYAN="", GREEN="")
-                        with print_lock:
-                            print(
-                                f"{CYAN}{_thr_label.strip()}{CLR} {WHITE}│{CLR}{bar_color}{bar_str}{CLR}{WHITE}│{CLR} "
-                                f"{BOLD}{pct:>5.1f}%{CLR} {WHITE}{speed_display:<13}{CLR}",
-                                flush=True,
-                            )
+                if "ERROR:" in line_str or "Failed" in line_str:
+                    has_error = True
+                    item_failed = True
 
-        process.wait()
-        cookie_issue = has_cookie_issue(local_logs)
+                if not cookie_issue and has_cookie_issue([line_str]):
+                    cookie_issue = True
+
+            if prog is not None:
+                pct = tracker.update(prog[0], prog[1])
+                if mp:
+                    mp.update(slot, pct, tracker.speed_text)
+                continue
+
+            if "Downloading item" in line_str:
+                m_item = _RE_ITEM.search(line_str)
+                if m_item and mp:
+                    n, total_items = int(m_item.group(1)), int(m_item.group(2))
+                    # Предыдущий элемент плейлиста закончился — фиксируем его итог.
+                    if cur_item is not None:
+                        mp.finish_track(slot, (key_base, cur_item), not item_failed)
+                    elif not item_mode and base_track_no is not None and total_items > 1:
+                        # Одна ссылка оказалась плейлистом — в общем счёте это теперь N треков.
+                        mp.add_total(total_items - 1)
+                    item_mode = True
+                    cur_item = n
+                    item_failed = False
+                    tracker = TrackProgress(expected_streams)
+                    mp.begin_track(slot, _label((n, total_items)))
+                continue
+
+            if "format(s):" in line_str:
+                fm = _RE_FORMATS.search(line_str)
+                if fm:
+                    tracker.set_expected(len(fm.group(1).split("+")))
+                continue
+
+            if "[download] Destination:" in line_str:
+                tracker.new_stream()
+                continue
+
+            if "already been downloaded" in line_str:
+                tracker.finish()
+                if mp:
+                    mp.set_stage(slot, tr("stage_exists"))
+                continue
+
+            stage = classify_post_stage(line_str)
+            if stage and mp:
+                tracker.finish()
+                mp.set_stage(slot, tr(stage))
+
+        returncode = process.wait()
+        cookie_issue = cookie_issue or has_cookie_issue(local_logs)
+
+        if mp:
+            if item_mode and cur_item is not None:
+                mp.finish_track(slot, (key_base, cur_item), returncode == 0 and not item_failed)
+            elif not item_mode:
+                mp.finish_track(slot, key_base, returncode == 0)
+
         with print_lock:
             shared_error_logs.extend(local_logs)
         return format_not_available, has_error, cookie_issue
@@ -1350,7 +1887,75 @@ def execute_playlist_worker(cmd, worker_id, print_lock, shared_error_logs):
     except Exception as e:
         with print_lock:
             shared_error_logs.append(tr("thread_err", id=worker_id, e=e))
+        if mp:
+            mp.finish_track(slot, key_base, False)
         return False, True, False
+
+def run_tracks_parallel(ytdlp_bin, urls, file_type, builder, tier=0, max_height=None,
+                        no_browser_cookies=False, shared_error_logs=None, print_lock=None,
+                        numbering=None):
+    """Параллельно качает `urls` — по одному процессу yt-dlp на ссылку.
+
+    Ссылки раздаются воркерам через общую очередь: поток, быстро закончивший
+    свой трек, сразу берёт следующий, а один "тяжёлый" трек не держит позади
+    себя половину списка (как было при статическом делении entries[i::workers]).
+    Каждый воркер ведёт одну строку-бар в общем блоке MultiProgress.
+
+    Возвращает {url: (format_not_available, has_error, cookie_issue)}.
+    """
+    if not urls:
+        return {}
+    shared_error_logs = shared_error_logs if shared_error_logs is not None else []
+    print_lock = print_lock or threading.Lock()
+    numbering = numbering or {u: i for i, u in enumerate(urls, start=1)}
+    workers = max(1, min(PLAYLIST_WORKERS, len(urls)))
+    expected = expected_stream_count(file_type, tier, max_height)
+
+    work_q = queue.Queue()
+    for u in urls:
+        work_q.put(u)
+    results = {}
+    results_lock = threading.Lock()
+
+    # ВАЖНО: команды собираются ЗАРАНЕЕ, в основном потоке и до старта блока
+    # прогресса. build_common_ytdlp_args -> get_cookies_args может напечатать
+    # предупреждение про cookies; если это случится из потока воркера уже
+    # посреди живого блока, лишние строки собьют перерисовку на месте.
+    cmds = {u: builder(ytdlp_bin, [u], file_type, tier=tier, max_height=max_height,
+                       no_browser_cookies=no_browser_cookies) for u in urls}
+    mp = MultiProgress(workers, total_tracks=len(urls))
+
+    def worker(slot):
+        try:
+            while True:
+                try:
+                    url = work_q.get_nowait()
+                except queue.Empty:
+                    return
+                r = execute_playlist_worker(cmds[url], slot + 1, print_lock, shared_error_logs,
+                                            mp=mp, slot=slot, track_no=numbering.get(url),
+                                            expected_streams=expected)
+                with results_lock:
+                    results[url] = r
+        finally:
+            mp.set_idle(slot)
+
+    mp.start()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(worker, s) for s in range(workers)]
+            for f in futures:
+                f.result()
+    finally:
+        mp.stop()
+    return results
+
+def _flags_from_results(results):
+    """(format_not_available, has_errors, cookie_issue) по словарю результатов."""
+    if not results:
+        return False, True, False
+    vals = list(results.values())
+    return any(r[0] for r in vals), any(r[1] for r in vals), any(r[2] for r in vals)
 
 def process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=0, max_height=None, no_browser_cookies=False):
     stop_anim()
@@ -1363,31 +1968,59 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=0, max_h
     shared_error_logs = []
 
     if entries:
+        entries = list(dict.fromkeys(entries))    # дубли в плейлисте не качаем дважды
         workers = max(1, min(PLAYLIST_WORKERS, len(entries)))
         print(tr("playlist_found", count=len(entries), workers=workers))
-        chunks = [entries[i::workers] for i in range(workers)]
+        numbering = {u: i for i, u in enumerate(entries, start=1)}
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = []
-            for i, chunk in enumerate(chunks):
-                if not chunk: continue
-                cmd = build_ytdlp_command_multi(ytdlp_bin, chunk, file_type, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
-                futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
-            results = [f.result() for f in futures]
+        def run(batch, t):
+            return run_tracks_parallel(
+                ytdlp_bin, batch, file_type, build_ytdlp_command_multi, tier=t,
+                max_height=max_height, no_browser_cookies=no_browser_cookies,
+                shared_error_logs=shared_error_logs, print_lock=print_lock, numbering=numbering)
+
+        results = run(entries, tier)
+
+        # Резервные клиенты YouTube перебираем только для ТЕХ треков, что упали
+        # с ошибкой формата/сессии. Раньше повтор перекачивал весь плейлист
+        # заново (а при --force-overwrites — ещё и перезаписывал готовые файлы).
+        failed = [u for u in entries if results.get(u, (False, True, False))[0]]
+        cur_tier = tier + 1
+        while failed and cur_tier < len(PLAYER_CLIENT_TIERS):
+            print(tr("fallback_start"))
+            clear_ytdlp_cache(ytdlp_bin)
+            retry = run(failed, cur_tier)
+            results.update(retry)
+            failed = [u for u in failed if retry.get(u, (False, True, False))[0]]
+            cur_tier += 1
+
+        _, has_errors, cookie_issue = _flags_from_results(results)
+        # Уровни клиентов исчерпаны внутри — внешнему циклу повторять нечего.
+        format_not_available = False
     else:
         workers = PLAYLIST_WORKERS
         print(tr("playlist_fallback", workers=workers))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = []
+        expected = expected_stream_count(file_type, tier, max_height)
+        # Команды — до старта живого блока (см. комментарий в run_tracks_parallel).
+        worker_cmds = []
+        for i in range(workers):
+            cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist=True, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
+            cmd.extend(["--playlist-items", f"{i + 1}::{workers}"])
+            worker_cmds.append(cmd)
+        mp = MultiProgress(workers, total_tracks=0)
+        mp.start()
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = []
+                for i, cmd in enumerate(worker_cmds):
+                    futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs,
+                                               mp, i, None, expected))
+                results = {i: f.result() for i, f in enumerate(futures)}
+        finally:
             for i in range(workers):
-                cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist=True, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
-                cmd.extend(["--playlist-items", f"{i + 1}::{workers}"])
-                futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
-            results = [f.result() for f in futures]
-
-    format_not_available = any(r[0] for r in results) if results else False
-    has_errors = any(r[1] for r in results) if results else True
-    cookie_issue = any(r[2] for r in results) if results else False
+                mp.set_idle(i)
+            mp.stop()
+        format_not_available, has_errors, cookie_issue = _flags_from_results(results)
 
     files_after = get_media_files_snapshot(SAVE_PATH)
     new_files = diff_media_snapshots(files_before, files_after)
@@ -1415,56 +2048,52 @@ def process_playlist_parallel(ytdlp_bin, url, file_type, platform, tier=0, max_h
 def download_urls_parallel(ytdlp_bin, urls, file_type, max_height=None):
     stop_anim()
     # Та же система, что используется для параллельной загрузки плейлиста
-    # (execute_playlist_worker + ThreadPoolExecutor), но воркерам раздаются
-    # не элементы одного плейлиста, а разные ссылки, введённые пользователем.
+    # (run_tracks_parallel), но воркерам раздаются не элементы одного
+    # плейлиста, а разные ссылки, введённые пользователем.
     files_before = get_media_files_snapshot(SAVE_PATH)
     print_lock = threading.Lock()
     shared_error_logs = []
+    numbering = {u: i for i, u in enumerate(urls, start=1)}
 
     def run_batch(batch_urls, tier, no_browser_cookies=False):
-        workers = max(1, min(PLAYLIST_WORKERS, len(batch_urls)))
-        chunks = [batch_urls[i::workers] for i in range(workers)]
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = []
-            for i, chunk in enumerate(chunks):
-                if not chunk: continue
-                cmd = build_ytdlp_command_urls(ytdlp_bin, chunk, file_type, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
-                futures.append(pool.submit(execute_playlist_worker, cmd, i + 1, print_lock, shared_error_logs))
-            return [f.result() for f in futures]
+        return run_tracks_parallel(
+            ytdlp_bin, batch_urls, file_type, build_ytdlp_command_urls, tier=tier,
+            max_height=max_height, no_browser_cookies=no_browser_cookies,
+            shared_error_logs=shared_error_logs, print_lock=print_lock, numbering=numbering)
 
     print(tr("playlist_found", count=len(urls), workers=max(1, min(PLAYLIST_WORKERS, len(urls)))))
     no_browser_cookies = False
     results = run_batch(urls, tier=0, no_browser_cookies=no_browser_cookies)
 
-    format_not_available = any(r[0] for r in results) if results else False
-    has_errors = any(r[1] for r in results) if results else True
-    cookie_issue = any(r[2] for r in results) if results else False
-
     # Если проблема именно в чтении cookies из браузера (например, Chrome
     # открыт и блокирует свою базу), переключение "уровней клиента"
     # YouTube тут не поможет — причина не в клиенте, а в самих cookies.
-    # Поэтому один раз пробуем повторить пакет вовсе без cookies: многие
-    # публичные треки/видео не требуют авторизации.
-    if cookie_issue and not no_browser_cookies and not os.path.exists(COOKIES_PATH):
+    # Поэтому один раз пробуем повторить БЕЗ cookies — но только те ссылки,
+    # которые на этом упали (раньше перекачивался весь пакет целиком).
+    cookie_failed = [u for u in urls if results.get(u, (False, True, False))[2]]
+    if cookie_failed and not no_browser_cookies and not os.path.exists(COOKIES_PATH):
         print(tr("cookie_retry_no_auth"))
         no_browser_cookies = True
-        results = run_batch(urls, tier=0, no_browser_cookies=no_browser_cookies)
-        format_not_available = any(r[0] for r in results) if results else False
-        has_errors = any(r[1] for r in results) if results else True
-        cookie_issue = any(r[2] for r in results) if results else False
+        results.update(run_batch(cookie_failed, tier=0, no_browser_cookies=no_browser_cookies))
 
     # Перебираем ВСЕ уровни клиентов (см. PLAYER_CLIENT_TIERS) по очереди,
     # а не только один резервный вариант, — так шанс скачать конкретное
     # проблемное видео (возрастное ограничение, нестандартный набор
     # форматов и т.п.) сохраняется даже если первый резерв тоже не подошёл.
+    # Повторяются только упавшие ссылки: уже скачанные не трогаем.
+    failed = [u for u in urls if results.get(u, (False, True, False))[0]]
     tier = 1
-    while format_not_available and tier < len(PLAYER_CLIENT_TIERS):
+    while failed and tier < len(PLAYER_CLIENT_TIERS):
         print(tr("fallback_start"))
         clear_ytdlp_cache(ytdlp_bin)
-        results = run_batch(urls, tier=tier, no_browser_cookies=no_browser_cookies)
-        format_not_available = any(r[0] for r in results) if results else False
-        has_errors = any(r[1] for r in results) if results else True
+        retry = run_batch(failed, tier=tier, no_browser_cookies=no_browser_cookies)
+        results.update(retry)
+        failed = [u for u in failed if retry.get(u, (False, True, False))[0]]
         tier += 1
+
+    # has_errors считаем по ИТОГОВЫМ результатам (с учётом успешных повторов);
+    # раньше учитывался только последний проход.
+    _, has_errors, _ = _flags_from_results(results)
 
     files_after = get_media_files_snapshot(SAVE_PATH)
     new_files = diff_media_snapshots(files_before, files_after)
@@ -1609,7 +2238,7 @@ def start_download_process(url, file_type, ytdlp_bin, max_height=None, show_head
         else:
             cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
             try:
-                success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform)
+                success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform, expected_streams=expected_stream_count(file_type, tier, max_height))
             except FileNotFoundError:
                 print(tr("ytdlp_not_found"))
                 success = False
@@ -1631,7 +2260,7 @@ def start_download_process(url, file_type, ytdlp_bin, max_height=None, show_head
             else:
                 cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
                 try:
-                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform)
+                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(cmd, platform, expected_streams=expected_stream_count(file_type, tier, max_height))
                 except FileNotFoundError:
                     print(tr("ytdlp_not_found"))
                     success = False
@@ -1654,7 +2283,7 @@ def start_download_process(url, file_type, ytdlp_bin, max_height=None, show_head
             else:
                 retry_cmd = build_ytdlp_command(ytdlp_bin, url, file_type, is_playlist, tier=tier, max_height=max_height, no_browser_cookies=no_browser_cookies)
                 try:
-                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(retry_cmd, platform)
+                    success, format_not_available, has_errors, cookie_issue = execute_and_stream_output(retry_cmd, platform, expected_streams=expected_stream_count(file_type, tier, max_height))
                 except FileNotFoundError:
                     print(tr("ytdlp_not_found"))
                     success = False
