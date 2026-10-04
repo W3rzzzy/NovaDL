@@ -145,7 +145,7 @@ TRANSLATIONS = {
         "input_1_2_3": "\r{YELLOW}[~] Нажмите 1, 2 или 3...{CLR}   ",
         "input_1_2_3_unix": "{WHITE}Выбор (1-3):{CLR} ",
         "input_1_2_3_warn": "{YELLOW}[~] Нужно ввести 1, 2 или 3.{CLR}",
-        "main_title": "{CYAN}NovaDL  |  v1.2.0{CLR}",
+        "main_title": "{CYAN}NovaDL  |  v1.4.0{CLR}",
         "main_save": "{WHITE}• Сохранение:  {YELLOW}{path}{CLR}",
         "main_cookie": "{WHITE}• Файл куки:   {color}{status}{CLR}",
         "cookie_active": "Активен",
@@ -261,7 +261,7 @@ TRANSLATIONS = {
         "input_1_2_3": "\r{YELLOW}[~] Press 1, 2, or 3...{CLR}   ",
         "input_1_2_3_unix": "{WHITE}Choice (1-3):{CLR} ",
         "input_1_2_3_warn": "{YELLOW}[~] Please enter 1, 2, or 3.{CLR}",
-        "main_title": "{CYAN}NovaDL  |  v1.2.0{CLR}",
+        "main_title": "{CYAN}NovaDL  |  v1.4.0{CLR}",
         "main_save": "{WHITE}• Save path:   {YELLOW}{path}{CLR}",
         "main_cookie": "{WHITE}• Cookie file: {color}{status}{CLR}",
         "cookie_active": "Active",
@@ -2393,7 +2393,7 @@ def main():
 
         # ── Заголовок-рамка ──
         _subtitle = "Загрузчик медиа" if CURRENT_LANG == "ru" else "Media Downloader"
-        _title = f"  \u25c6 NovaDL  v1.2.0  \u2014  {_subtitle}"
+        _title = f"  \u25c6 NovaDL  v1.4.0  \u2014  {_subtitle}"
         _title_pad = max(0, _INNER - len(_title))
         print(f"{CYAN}\u2554{'=' * _INNER}\u2557{CLR}")
         print(f"{CYAN}\u2551{CLR}{BOLD}{CYAN}{_title}{' ' * _title_pad}{CYAN}\u2551{CLR}")
